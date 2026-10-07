@@ -21,7 +21,7 @@ import wx
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-VERSION = '0.9.1'
+VERSION = '0.9.2'
 
 _ACTIVE = []          # keep running jobs referenced after the PCB frame closes
 
@@ -138,26 +138,138 @@ def _norm(p):
 
 # ------------------------------------------------------------------ log window
 
+SPIN = '|/-\\'
+
+
 class LogWindow(wx.Frame):
-    def __init__(self, parent, project_dir=None):
-        super().__init__(parent, title=f'Eagle Exhumer {VERSION}', size=(980, 640),
-                         style=wx.DEFAULT_FRAME_STYLE | wx.FRAME_FLOAT_ON_PARENT)
+    """Progress window: what is happening now, how far we are, that we are still alive - and, at the
+    end, the verdict with the next actions. The raw log is there, but folded away."""
+    def __init__(self, parent, project_dir=None, mode_note=''):
+        super().__init__(parent, title=f'Eagle Exhumer {VERSION}', size=(860, 300),
+                         style=wx.DEFAULT_FRAME_STYLE | (wx.FRAME_FLOAT_ON_PARENT if parent else 0))
         self.project_dir = project_dir
-        panel = wx.Panel(self)
-        self.txt = wx.TextCtrl(panel, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.HSCROLL | wx.TE_RICH2)
+        self.mgr = None
+        self.t0 = time.time()
+        self.pct = 0
+        self.spin = 0
+        self.done = False
+        p = self.panel = wx.Panel(self)
+        big = wx.Font(13, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
+        mono = wx.Font(10, wx.FONTFAMILY_TELETYPE, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
+        self.stage = wx.StaticText(p, label='Starting...')
+        self.stage.SetFont(big)
+        self.gauge = wx.Gauge(p, range=100, size=(-1, 18))
+        self.bar = wx.StaticText(p, label='')
+        self.bar.SetFont(mono)
+        self.note = wx.StaticText(p, label=mode_note)
+        self.note.SetForegroundColour(wx.Colour(150, 90, 0))
+        self.result = wx.StaticText(p, label='')
+        self.result.SetFont(big)
+        self.txt = wx.TextCtrl(p, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.HSCROLL | wx.TE_RICH2)
         self.txt.SetFont(wx.Font(9, wx.FONTFAMILY_TELETYPE, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
-        bar = wx.BoxSizer(wx.HORIZONTAL)
-        b_folder = wx.Button(panel, label='Open project folder')
-        b_report = wx.Button(panel, label='Report a problem...')
-        b_folder.Bind(wx.EVT_BUTTON, self._open_folder)
-        b_report.Bind(wx.EVT_BUTTON, self._report)
-        bar.Add(b_folder, 0, wx.RIGHT, 8)
-        bar.Add(b_report, 0)
+        self.b_details = wx.ToggleButton(p, label='Show details')
+        self.b_sch = wx.Button(p, label='Open schematic')
+        self.b_pcb = wx.Button(p, label='Open PCB')
+        self.b_report_md = wx.Button(p, label='Open report')
+        self.b_folder = wx.Button(p, label='Project folder')
+        self.b_problem = wx.Button(p, label='Report a problem...')
+        for b in (self.b_sch, self.b_pcb, self.b_report_md):
+            b.Hide()
+        self.b_details.Bind(wx.EVT_TOGGLEBUTTON, self._toggle)
+        self.b_folder.Bind(wx.EVT_BUTTON, self._open_folder)
+        self.b_problem.Bind(wx.EVT_BUTTON, self._report)
+        self.b_report_md.Bind(wx.EVT_BUTTON, self._open_report)
+        self.b_sch.Bind(wx.EVT_BUTTON, lambda e: self._open_editor('\tCtrl+E'))
+        self.b_pcb.Bind(wx.EVT_BUTTON, lambda e: self._open_editor('\tCtrl+P'))
+        btns = wx.BoxSizer(wx.HORIZONTAL)
+        btns.Add(self.b_details, 0, wx.RIGHT, 8)
+        btns.AddStretchSpacer()
+        for b in (self.b_sch, self.b_pcb, self.b_report_md, self.b_folder, self.b_problem):
+            btns.Add(b, 0, wx.LEFT, 6)
         box = wx.BoxSizer(wx.VERTICAL)
-        box.Add(self.txt, 1, wx.EXPAND | wx.ALL, 6)
-        box.Add(bar, 0, wx.ALIGN_RIGHT | wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
-        panel.SetSizer(box)
+        box.Add(self.stage, 0, wx.EXPAND | wx.ALL, 10)
+        box.Add(self.gauge, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 10)
+        box.Add(self.bar, 0, wx.EXPAND | wx.ALL, 10)
+        box.Add(self.note, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
+        box.Add(self.result, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 10)
+        box.Add(self.txt, 1, wx.EXPAND | wx.ALL, 10)
+        box.Add(btns, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
+        p.SetSizer(box)
+        self.note.Wrap(820)
+        self.txt.Hide()
+        self.timer = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER, self._tick, self.timer)
+        self.timer.Start(250)
+        self.CentreOnScreen()
         self.Show()
+
+    # -- progress
+    def set_stage(self, pct, label):
+        self.pct = max(self.pct, min(100, int(pct)))
+        if label and label != self.stage.GetLabel():
+            self.stage.SetLabel(label)
+            if not any(isinstance(w, wx.Dialog) and w.IsShown() for w in wx.GetTopLevelWindows()):
+                self.Raise()                   # back on top after KiCad's windows - never over a dialog
+        self.gauge.SetValue(self.pct)
+        self._tick()
+
+    def _tick(self, _evt=None):
+        if not self:
+            return
+        el = int(time.time() - self.t0)
+        n = 30
+        k = self.pct * n // 100
+        if self.done:
+            self.bar.SetLabel(f'[{"#" * n}] 100%   finished in {el // 60:02d}:{el % 60:02d}')
+            return
+        self.spin = (self.spin + 1) % len(SPIN)
+        self.bar.SetLabel(f'[{"#" * k}{"." * (n - k)}] {self.pct:3d}%   {SPIN[self.spin]} working, '
+                          f'{el // 60:02d}:{el % 60:02d} elapsed - not frozen, some steps take a minute')
+
+    def log(self, s):
+        if self:
+            self.txt.AppendText(s + '\n')
+
+    def _toggle(self, _evt=None):
+        show = self.b_details.GetValue()
+        self.txt.Show(show)
+        self.b_details.SetLabel('Hide details' if show else 'Show details')
+        w, h = self.GetSize()
+        self.SetSize((w, max(h, 640) if show else 300 + (60 if self.done else 0)))
+        self.panel.Layout()
+
+    # -- end state
+    def finish(self, ok, headline, detail, can_open=True):
+        self.done = True
+        self.timer.Stop()
+        self.gauge.SetValue(100 if ok is not None else self.pct)
+        self.stage.SetLabel(headline)
+        self.result.SetLabel(detail)
+        self.result.SetForegroundColour(wx.Colour(0, 130, 40) if ok else wx.Colour(190, 30, 30))
+        self.result.Wrap(820)
+        self.note.SetLabel('')
+        self._tick()
+        for b in (self.b_sch, self.b_pcb):
+            b.Show(bool(can_open and self.mgr))
+        self.b_report_md.Show(bool(self.project_dir and os.path.isfile(os.path.join(self.project_dir, 'eaglefix_report.md'))))
+        if ok is False:
+            self.b_details.SetValue(True)
+        self._toggle()
+        self.panel.Layout()
+        self.Raise()
+
+    def _open_editor(self, accel):
+        """One editor per click - opening both at once makes KiCad abort the first load."""
+        if not self.mgr:
+            return
+        mid = _find_item(self.mgr, lambda l: l.endswith(accel))
+        if mid is not None:
+            _menu_action(self.mgr, mid)
+
+    def _open_report(self, _evt=None):
+        f = os.path.join(self.project_dir or '', 'eaglefix_report.md')
+        if os.path.isfile(f):
+            wx.LaunchDefaultApplication(f)
 
     def _open_folder(self, _evt=None):
         if self.project_dir and os.path.isdir(self.project_dir):
@@ -186,10 +298,6 @@ class LogWindow(wx.Frame):
         webbrowser.open(diag.issue_url(env, summ, ans == wx.YES))
         wx.LaunchDefaultApplication(os.path.dirname(zpath))
 
-    def log(self, s):
-        if self:
-            self.txt.AppendText(s + '\n')
-
 
 # ------------------------------------------------------------------ job
 
@@ -198,12 +306,20 @@ class ImportJob:
         self.mgr, self.mid, self.src, self.target = manager, eagle_mid, src, target
         self.name = os.path.splitext(os.path.basename(src))[0]
         self.pro = os.path.join(target, self.name + '.kicad_pro')
-        self.win = LogWindow(manager, target)
+        self.win = LogWindow(manager, target, mode_note=self.NOTE)
+        self.win.mgr = manager
         self.mapped = set()
         self.timer = None
+        self.fix_base, self.fix_step = 20, 'Step 3/3'
+
+    NOTE = ('KiCad now opens and closes its own windows (file dialogs, layer mapping, schematic and PCB '
+            'editors) - this is expected, please do not click them. This window shows where we are.')
 
     def log(self, s):
         wx.CallAfter(self.win.log, s)
+
+    def stage(self, pct, label):
+        wx.CallAfter(self.win.set_stage, pct, label)
 
     # -- step 1: KiCad's own import
     def start(self):
@@ -211,6 +327,7 @@ class ImportJob:
         self.log(f'Eagle source : {self.src}')
         self.log(f'KiCad project: {self.pro}')
         self.log('\n1) KiCad Eagle import (File > Import Non-KiCad Project > EAGLE)...')
+        self.stage(3, 'Step 1/3 - KiCad imports the Eagle design')
         from win_dialogs import DialogDriver
         # file dialog, destination dialog, then the layer-mapping dialog (opens BEHIND the
         # main window in KiCad 10.0.5 -> looks like a freeze): brought to front + auto-matched
@@ -236,8 +353,12 @@ class ImportJob:
         # (pcbnew.GetSettingsManager() is not usable here: the PCB frame that ran the plugin is gone)
         if not os.path.isfile(self.pro) or not self._editor_frames():
             self.log('\nImport cancelled or failed (no imported project / editors found).')
+            self.win.finish(False, 'Stopped - the KiCad import did not finish',
+                            'KiCad did not produce the imported project (cancelled, or an import dialog was '
+                            'closed). Nothing was changed. Try again, or use "Report a problem...".', can_open=False)
             return
         self.log(f'  KiCad import done in {time.time() - t0:.0f} s')
+        self.stage(16, 'Step 2/3 - Saving the imported project')
         # KiCad 10.0.5 leaves both editors unsaved -> File > Save in each, then close them
         for f in self._editor_frames():
             mid = _find_item(f, lambda l: l.endswith('\tCtrl+S'))
@@ -252,6 +373,9 @@ class ImportJob:
             wx.CallLater(500, self._close_editors_then_fix, tries + 1); return
         if missing:
             self.log(f'\nNot saved by KiCad: {missing} - save the editors manually, then run the fix-only .bat')
+            self.win.finish(False, 'Stopped - KiCad did not save the imported project',
+                            'Save the schematic and the PCB editor (Ctrl+S), then click the Eagle Exhumer button '
+                            'and choose "Fix + check the OPEN project".', can_open=False)
             return
         for f in self._editor_frames():
             f.Close()
@@ -272,6 +396,7 @@ class ImportJob:
                     args += [opt, dst]
                     break
         self.log('\n2) eagle2kicad_fix...')
+        self.stage(self.fix_base, f'{self.fix_step} - Repair and quality control')
         cmd = [_python(), '-u', os.path.join(HERE, 'eagle2kicad_fix.py'), self.target] + args
         flags = 0x08000000 if os.name == 'nt' else 0
         self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -284,6 +409,14 @@ class ImportJob:
             line = line.rstrip()
             if 'image handler' in line or 'memory leak' in line:
                 continue                       # wx / swig noise from the pcbnew module
+            if line.startswith('@@PROGRESS'):
+                parts = line.split(' ', 2)
+                try:
+                    pct = self.fix_base + int(parts[1]) * (100 - self.fix_base) // 100
+                    self.stage(pct, f'{self.fix_step} - ' + (parts[2] if len(parts) > 2 else ''))
+                except ValueError:
+                    pass
+                continue
             if not line.strip():
                 if blank:
                     continue
@@ -304,25 +437,25 @@ class ImportJob:
 
     def _finish(self, rc):
         wx.CallLater(500, self._save_log)
-        if rc == 1:
-            self.log('\n*** QC FAIL: the converted design is NOT identical to the Eagle source - '
-                     'see "QC VERDICT" in the report before using it! ***')
+        rep = os.path.join(self.target, 'eaglefix_report.md')
+        if rc == 0:
+            self.win.finish(True, 'Done - QC PASS',
+                            'The KiCad project matches the Eagle source. Open the schematic or the PCB below; '
+                            'in the PCB editor press B to refill the zones.')
+        elif rc == 1:
+            self.win.finish(False, 'Done - QC FAIL: please check before you use it',
+                            'The project was converted and fixed, but the quality control found differences '
+                            'from the Eagle source. They are listed under "QC VERDICT" in the report.')
         elif rc == 3:
-            self.log('\n*** SELFTEST FAIL: the verifier missed an injected fault - results not trustworthy ***')
-        elif rc != 0:
-            self.log(f'\nFix-up FAILED (exit {rc}) - the KiCad import itself is saved and intact.')
-            self.log('Please use "Report a problem..." below - it packs the logs and opens a GitHub issue.')
-            return
+            self.win.finish(False, 'Done - QC self-check failed',
+                            'The quality control could not prove itself on this design, so the result is not '
+                            'trustworthy. Please use "Report a problem...".')
         else:
-            self.log('\nQC PASS: netlists, pads, geometry and values identical to the Eagle source.')
-        self.log('\n3) Opening the schematic and PCB editors...')
-        for acc in ('\tCtrl+E', '\tCtrl+P'):
-            mid = _find_item(self.mgr, lambda l, a=acc: l.endswith(a))
-            if mid is not None:
-                _menu_action(self.mgr, mid)
-        self.log(f'\nDONE.  Report: {os.path.join(self.target, "eaglefix_report.md")}')
-        self.log('PCB Editor: Tools > Update PCB from Schematic (F8), then B (refill zones), ERC/DRC.')
-        wx.CallLater(3000, self._reenable)
+            self.win.finish(False, f'Stopped - the repair step failed (exit {rc})',
+                            'The KiCad import itself is saved and intact. Please use "Report a problem..." - it '
+                            'packs the logs and opens a GitHub issue.', can_open=os.path.isfile(self.pro))
+        self.log(f'\nReport: {rep}')
+        wx.CallLater(1500, self._reenable)
 
     def _reenable(self):
         # KiCad leaves the project manager disabled after the editors were opened from here
@@ -339,16 +472,22 @@ class ImportJob:
 class FixJob(ImportJob):
     """Fix + verify an ALREADY imported project (any platform): close the editors, run the fixer
     on the project folder against the Eagle source, reopen the editors."""
+    NOTE = ('The schematic and PCB editors are closed now (KiCad asks you to save unsaved changes - '
+            'answer that dialog), then the project is repaired and checked. Use the buttons at the end to '
+            'reopen the editors.')
+
     def __init__(self, manager, src, project_file):
         super().__init__(manager, None, src, os.path.dirname(project_file))
         self.name = os.path.splitext(os.path.basename(project_file))[0]
         self.pro = project_file
+        self.fix_base, self.fix_step = 5, 'Step 2/2'
 
     def start(self):
         _ACTIVE.append(self)
         self.log(f'Eagle source : {self.src}')
         self.log(f'KiCad project: {self.pro}')
         self.log('\n1) Closing the editors (save your changes when KiCad asks)...')
+        self.stage(1, 'Step 1/2 - Closing the editors')
         for f in self._editor_frames():
             f.Close()
         wx.CallLater(1500, self._wait_closed)
@@ -357,7 +496,10 @@ class FixJob(ImportJob):
         if self._editor_frames() and tries < 120:
             wx.CallLater(500, self._wait_closed, tries + 1); return
         if self._editor_frames():
-            self.log('Editors are still open - close them and run the button again.'); return
+            self.win.finish(None, 'Not started - the editors are still open',
+                            'Close the schematic and PCB editors, then click the Eagle Exhumer button again.',
+                            can_open=False)
+            return
         wx.CallLater(500, self._run_fix)
 
 
@@ -381,7 +523,7 @@ class Eagle2KiCadImport(pcbnew.ActionPlugin):
             wx.MessageBox('Open the PCB Editor from the KiCad project manager window '
                           '(the Eagle import is a project-manager function).', 'Eagle Exhumer', wx.ICON_WARNING)
             return
-        modes = ['Fix + verify the OPEN project (already imported with File > Import > EAGLE)']
+        modes = ['Fix + check the OPEN project (already imported with File > Import > EAGLE)']
         if os.name == 'nt':
             modes.insert(0, 'One-click import of an Eagle design into a NEW KiCad project')
         if len(modes) > 1:

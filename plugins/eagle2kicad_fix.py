@@ -1414,7 +1414,8 @@ def verify_geometry(pcb_path, ebrd):
     n_val = 0
     for e in els:
         fp = fps.get(kref(e.get('name')))
-        if fp is not None and e.get('value') is not None and fp.GetValue().strip() != e.get('value').strip():
+        # an EMPTY Eagle value: KiCad needs a Value and the importer fills in the device name -> not a difference
+        if fp is not None and (e.get('value') or '').strip() and fp.GetValue().strip() != e.get('value').strip():
             n_val += 1
             if n_val <= 5: issues.append(f'part `{kref(e.get("name"))}` value Eagle `{e.get("value")}`, KiCad `{fp.GetValue()}`')
     # 2. copper per net
@@ -2118,7 +2119,7 @@ def verify_sch_values(esch, sheets):
         r = kref(p.get('name'))
         if r not in kval:
             n_missing += 1; bad.append(f'`{r}` missing in KiCad schematic'); continue
-        if p.get('value') is not None:
+        if (p.get('value') or '').strip():          # empty Eagle value -> KiCad shows the device name
             n += 1
             if kval[r].strip() != p.get('value').strip():
                 bad.append(f'`{r}` Eagle `{p.get("value")}` KiCad `{kval[r]}`')
@@ -2276,9 +2277,10 @@ def selftest(d, proj, cli, esch, ebrd):
         at = kid(fp, 'at'); at[1] = f'{float(at[1]) + 0.2:g}'
         used.add(id(fp))
         results.append(('F3 footprint moved 0.2 mm', 'moved', prop_val(fp, 'Reference'))); break
-    # F4: value changed
+    # F4: value changed (on a part whose Eagle value is not empty - empty values are not compared)
+    has_val = {kref(e.get('name')) for e in eagle_root(ebrd).iter('element') if (e.get('value') or '').strip()}
     for fp in fps:
-        if id(fp) in used: continue
+        if id(fp) in used or prop_val(fp, 'Reference') not in has_val: continue
         pv = prop(fp, 'Value')
         if pv is not None and str(pv[2]):
             pv[2] = Q(str(pv[2]) + '_X')
@@ -2369,6 +2371,11 @@ def selftest(d, proj, cli, esch, ebrd):
 
 # --------------------------------------------------------------------------- main
 
+def progress(pct, label):
+    """Machine-readable progress line for the plugin window (stripped from the visible log)."""
+    print(f'@@PROGRESS {int(pct)} {label}', flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('project_dir')
@@ -2407,6 +2414,7 @@ def main():
                   '(use --refix to force the fix steps again).')
             a.verify_only = True
             a.selftest = True
+    progress(2, 'Reading the project')
     R.h('Project')
     R.p(f'project `{proj}`, sch `{os.path.basename(root_sch)}`, pcb: {has_pcb}')
     R.p(f'Eagle sch: {esch}  |  Eagle brd: {ebrd}  |  kicad-cli: {cli}')
@@ -2466,14 +2474,21 @@ def main():
             m['sch_values'] = dict(SCH_VAL)
         return comps
 
+    progress(5, 'Quality control: comparing the project with the Eagle source' if a.verify_only
+             else 'Measuring the native KiCad import')
     comps = verify('current' if a.verify_only else 'before')
     if a.verify_only:
         geom = dict(GEOM_LOG[-1]) if GEOM_LOG else None
+        if a.selftest and has_pcb and ebrd:
+            progress(55, 'Quality control: self-check')
         st = selftest(d, proj, cli, esch, ebrd) if (a.selftest and has_pcb and ebrd) else None
+        progress(88, 'Writing the report')
         fails = qc_verdict(st, geom)
         write_metrics(d, proj, esch, ebrd, fails, st, 'verify')
         if has_pcb and not a.no_render:
+            progress(90, '3D renders (about a minute)')
             render_3d(cli, pcb, d)
+        progress(100, 'Done')
         VIEW.close(); R.save(os.path.join(d, 'eaglefix_report.md'))
         sys.exit(3 if st is False else (1 if fails else 0))
 
@@ -2485,6 +2500,7 @@ def main():
                 shutil.copy2(f, bk)
         R.h('Backup'); R.p(bk)
 
+    progress(15, 'Fixing the schematic')
     fix_power_values(sheets)
     if not a.no_label_globalize:
         fix_local_labels(sheets)
@@ -2495,6 +2511,7 @@ def main():
     ensure_symbol_lib(d, proj, sheets, a.dry_run)
 
     if has_pcb:
+        progress(25, 'Fixing the PCB')
         fix_pcb_sexpr(pcb, comps, a.dry_run, ebrd)
         promote_fp_edge_cuts(pcb, a.dry_run)          # first: milling is classified against the outline
         if ebrd:
@@ -2509,36 +2526,47 @@ def main():
         if a.dry_run:
             R.p('dry run: footprint library step skipped')
         else:
+            progress(35, 'Building the project footprint library')
             footprint_library(pcb, d, nick, sheets, a.dry_run)
             for s in sheets: s.save()
+        progress(40, 'Design rules and net classes')
         apply_design_rules(pro, ebrd, a.dry_run)
         if ebrd:
             eagle_dru_rules(d, proj, ebrd, a.dry_run)
 
     if cli and not a.dry_run and os.path.isfile(root_sch):
         sheets = [Sheet(p) for p in sorted(glob.glob(os.path.join(d, '*.kicad_sch')))]
+        progress(45, 'Schematic clean-up (ERC passes)')
         fix_stub_wires(cli, root_sch, sheets, tmpdir)
         if not a.no_pwr_flags:
             sheets = [Sheet(p) for p in sorted(glob.glob(os.path.join(d, '*.kicad_sch')))]
+            progress(50, 'Power flags')
             add_pwr_flags(cli, root_sch, sheets, tmpdir)
             for s in sheets: s.save()
         sheets = [Sheet(p) for p in sorted(glob.glob(os.path.join(d, '*.kicad_sch')))]
+        progress(55, 'Restoring Eagle net names')
         restore_net_names(cli, root_sch, sheets, tmpdir, eagle_sch_truth(esch) if esch else None)
         sheets = [Sheet(p) for p in sorted(glob.glob(os.path.join(d, '*.kicad_sch')))]
+        progress(60, 'No-connect flags')
         add_no_connects(cli, root_sch, sheets, tmpdir, eagle_sch_truth(esch) if esch else None)
         for s in sheets: s.save()
 
     if not a.dry_run:
+        progress(65, 'Quality control: comparing the result with the Eagle source')
         verify('after')
     st = None
     geom = dict(GEOM_LOG[-1]) if GEOM_LOG else None
     if (a.selftest or not a.dry_run) and has_pcb and ebrd:
+        progress(80, 'Quality control: self-check')
         st = selftest(d, proj, cli, esch, ebrd)
     fails = qc_verdict(st, geom) if not a.dry_run else []
     if not a.dry_run:
+        progress(90, 'Writing the report')
         write_metrics(d, proj, esch, ebrd, fails, st, 'fix')
         if has_pcb and not a.no_render:
+            progress(92, '3D renders (about a minute)')
             render_3d(cli, pcb, d)
+    progress(100, 'Done')
     VIEW.close()
     R.save(os.path.join(d, 'eaglefix_report.md'))
     print('\nReport: ' + os.path.join(d, 'eaglefix_report.md'))
