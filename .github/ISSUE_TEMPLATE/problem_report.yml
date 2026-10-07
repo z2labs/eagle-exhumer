@@ -1,0 +1,58 @@
+name: Problem report
+description: Something went wrong with an import, a fix or a QC result
+labels: ["problem"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! The fastest way: click **Report a problem...** in the Eagle Exhumer window -
+        it packs a diagnostic zip and opens this form pre-filled. **Drag the zip into the "What happened"
+        box below.** Issues are public: only attach design files you are allowed to share.
+  - type: input
+    id: plugin
+    attributes:
+      label: Eagle Exhumer version
+      placeholder: "0.9.1"
+    validations:
+      required: true
+  - type: input
+    id: kicad
+    attributes:
+      label: KiCad version
+      placeholder: "10.0.6"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "Windows 11 / Ubuntu 24.04 / macOS 15"
+    validations:
+      required: true
+  - type: input
+    id: verdict
+    attributes:
+      label: Result shown by Eagle Exhumer
+      placeholder: "QC PASS / QC FAIL / crash / import did not start"
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What did you do, what did you expect, what happened instead? Drag the diagnostic zip here.
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Findings / error (pre-filled)
+      render: text
+  - type: input
+    id: design
+    attributes:
+      label: Design files included in the zip?
+      placeholder: "no - report and logs only"
+  - type: input
+    id: eagle
+    attributes:
+      label: Eagle version that saved the files (if known)
+      placeholder: "6.4 / 7.7 / 9.6.2"

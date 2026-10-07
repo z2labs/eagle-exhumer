@@ -18,6 +18,9 @@ def main():
     a = ap.parse_args()
     meta = json.load(open(os.path.join(ROOT, 'metadata.json'), encoding='utf-8'))
     ver = meta['versions'][0]['version']
+    for f in ('plugins/__init__.py', 'plugins/diag.py'):
+        src = open(os.path.join(ROOT, f), encoding='utf-8').read()
+        assert f"VERSION = '{ver}'" in src, f'{f}: VERSION != metadata {ver}'
     dist = os.path.join(ROOT, 'dist'); os.makedirs(dist, exist_ok=True)
     zpath = os.path.join(dist, f"eagle-exhumer-{ver}-pcm.zip")
     install = 0

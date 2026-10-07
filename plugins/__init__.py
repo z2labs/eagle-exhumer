@@ -21,6 +21,7 @@ import wx
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+VERSION = '0.9.1'
 
 _ACTIVE = []          # keep running jobs referenced after the PCB frame closes
 
@@ -138,12 +139,52 @@ def _norm(p):
 # ------------------------------------------------------------------ log window
 
 class LogWindow(wx.Frame):
-    def __init__(self, parent):
-        super().__init__(parent, title='Eagle Exhumer', size=(980, 640),
+    def __init__(self, parent, project_dir=None):
+        super().__init__(parent, title=f'Eagle Exhumer {VERSION}', size=(980, 640),
                          style=wx.DEFAULT_FRAME_STYLE | wx.FRAME_FLOAT_ON_PARENT)
-        self.txt = wx.TextCtrl(self, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.HSCROLL | wx.TE_RICH2)
+        self.project_dir = project_dir
+        panel = wx.Panel(self)
+        self.txt = wx.TextCtrl(panel, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.HSCROLL | wx.TE_RICH2)
         self.txt.SetFont(wx.Font(9, wx.FONTFAMILY_TELETYPE, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
+        bar = wx.BoxSizer(wx.HORIZONTAL)
+        b_folder = wx.Button(panel, label='Open project folder')
+        b_report = wx.Button(panel, label='Report a problem...')
+        b_folder.Bind(wx.EVT_BUTTON, self._open_folder)
+        b_report.Bind(wx.EVT_BUTTON, self._report)
+        bar.Add(b_folder, 0, wx.RIGHT, 8)
+        bar.Add(b_report, 0)
+        box = wx.BoxSizer(wx.VERTICAL)
+        box.Add(self.txt, 1, wx.EXPAND | wx.ALL, 6)
+        box.Add(bar, 0, wx.ALIGN_RIGHT | wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
+        panel.SetSizer(box)
         self.Show()
+
+    def _open_folder(self, _evt=None):
+        if self.project_dir and os.path.isdir(self.project_dir):
+            wx.LaunchDefaultApplication(self.project_dir)
+
+    def _report(self, _evt=None):
+        """Diagnostic zip + pre-filled GitHub issue. Design files only with explicit consent."""
+        import diag, webbrowser
+        if not self.project_dir or not os.path.isdir(self.project_dir):
+            webbrowser.open(diag.REPO + '/issues/new/choose'); return
+        ans = wx.MessageBox(
+            'Eagle Exhumer will pack a diagnostic zip (run report, metrics, logs, versions) and open a '
+            'pre-filled GitHub issue in your browser. Nothing is uploaded automatically - you drag the zip '
+            'into the issue yourself.\n\nThe report lists part references and net names. Also include the '
+            'DESIGN FILES (KiCad project + Eagle source)? Only say Yes if you are allowed to share them '
+            'publicly - GitHub issues are public.',
+            'Report a problem', wx.YES_NO | wx.CANCEL | wx.NO_DEFAULT | wx.ICON_QUESTION)
+        if ans == wx.CANCEL:
+            return
+        try:
+            zpath, env, summ = diag.make_bundle(self.project_dir, include_design=(ans == wx.YES),
+                                                extra_log=self.txt.GetValue())
+        except Exception as e:
+            wx.MessageBox(f'Could not create the diagnostic zip: {e}', 'Report a problem', wx.ICON_ERROR); return
+        self.log(f'\nDiagnostic zip: {zpath}\nDrag it into the GitHub issue that is opening now.')
+        webbrowser.open(diag.issue_url(env, summ, ans == wx.YES))
+        wx.LaunchDefaultApplication(os.path.dirname(zpath))
 
     def log(self, s):
         if self:
@@ -157,7 +198,7 @@ class ImportJob:
         self.mgr, self.mid, self.src, self.target = manager, eagle_mid, src, target
         self.name = os.path.splitext(os.path.basename(src))[0]
         self.pro = os.path.join(target, self.name + '.kicad_pro')
-        self.win = LogWindow(manager)
+        self.win = LogWindow(manager, target)
         self.mapped = set()
         self.timer = None
 
@@ -254,7 +295,15 @@ class ImportJob:
         wx.CallAfter(self._finish, rc)
 
     # -- step 3: open the fixed project in the editors
+    def _save_log(self):
+        try:
+            with open(os.path.join(self.target, 'eaglefix_console.log'), 'w', encoding='utf-8') as f:
+                f.write(self.win.txt.GetValue())
+        except Exception:
+            pass
+
     def _finish(self, rc):
+        wx.CallLater(500, self._save_log)
         if rc == 1:
             self.log('\n*** QC FAIL: the converted design is NOT identical to the Eagle source - '
                      'see "QC VERDICT" in the report before using it! ***')
@@ -262,6 +311,7 @@ class ImportJob:
             self.log('\n*** SELFTEST FAIL: the verifier missed an injected fault - results not trustworthy ***')
         elif rc != 0:
             self.log(f'\nFix-up FAILED (exit {rc}) - the KiCad import itself is saved and intact.')
+            self.log('Please use "Report a problem..." below - it packs the logs and opens a GitHub issue.')
             return
         else:
             self.log('\nQC PASS: netlists, pads, geometry and values identical to the Eagle source.')

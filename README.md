@@ -96,6 +96,14 @@ Converted boards, rendered from the KiCad projects Eagle Exhumer produced (fille
 
 <sub>Olimex designs © Olimex Ltd, open hardware from the [OLINUXINO repository](https://github.com/OLIMEX/OLINUXINO); other boards: Zoltan Doczi PCB designs. Renders are of the converted KiCad projects.</sub>
 
+## Reporting problems
+
+Click **Report a problem...** in the Eagle Exhumer window. It packs a diagnostic zip with the run report, metrics, logs and the versions of the plugin, KiCad and the OS, saves the zip next to your project, and opens a pre-filled [GitHub issue](https://github.com/z2labs/eagle-exhumer/issues/new?template=problem_report.yml). Drag the zip into the issue.
+
+- Nothing is uploaded automatically.
+- Design files (the KiCad project and the Eagle source) go into the zip **only if you say Yes**. GitHub issues are public, so only include designs you may share.
+- From the command line: `python diag.py <kicad_project_dir> [--include-design]`.
+
 ## Known limits
 
 - EAGLE 5 and older binary files cannot be read by KiCad. Save them once as XML in EAGLE 6+ or Fusion first.
