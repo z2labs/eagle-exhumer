@@ -2160,6 +2160,47 @@ def qc_verdict(selftest_ok=None, geom=None):
     return fails
 
 
+WARNINGS = {}
+
+
+def check_3d_models(pcb_path):
+    """WARNING only (not a QC failure): footprints without a usable 3D model. Eagle designs carry no
+    3D models, so after an import this is normally every footprint - the 3D view shows bare pads."""
+    R.h('WARNING: 3D models')
+    try:
+        import pcbnew
+    except ImportError:
+        R.p('pcbnew module not available - skipped'); return
+    board = pcbnew.LoadBoard(pcb_path)
+    roots = [v for k, v in os.environ.items() if k.startswith('KICAD') and k.endswith('3DMODEL_DIR')]
+    roots += glob.glob(r'C:\Program Files\KiCad\*\share\kicad\3dmodels') + ['/usr/share/kicad/3dmodels',
+             '/Applications/KiCad/KiCad.app/Contents/SharedSupport/3dmodels']
+    def found(fn):
+        f = re.sub(r'\$\{KICAD\d*_3DMODEL_DIR\}', '{root}', fn)
+        if '{root}' in f:
+            return any(os.path.isfile(f.replace('{root}', r)) for r in roots)
+        f = os.path.expandvars(f)
+        return os.path.isfile(f if os.path.isabs(f) else os.path.join(os.path.dirname(pcb_path), f))
+    none, broken, n = [], [], 0
+    for fp in board.GetFootprints():
+        if fp.GetAttributes() & getattr(pcbnew, 'FP_BOARD_ONLY', 0):
+            continue
+        n += 1
+        models = [m for m in fp.Models() if getattr(m, 'm_Show', True)]
+        if not models:
+            none.append(fp.GetReference())
+        elif not any(found(m.m_Filename) for m in models):
+            broken.append(fp.GetReference())
+    WARNINGS['no_3d_model'] = len(none)
+    WARNINGS['3d_model_not_found'] = len(broken)
+    R.p(f'{len(none)} of {n} footprints have no 3D model, {len(broken)} point to a model file that is not found '
+        '(Eagle designs carry no 3D models - assign them in the footprint properties if you need the 3D view / STEP)')
+    if none:
+        R.p('  without model: ' + ', '.join(sorted(none)[:40]) + (' ...' if len(none) > 40 else ''))
+    if broken:
+        R.p('  model not found: ' + ', '.join(sorted(broken)[:40]))
+
+
 def write_metrics(d, proj, esch, ebrd, fails, selftest_ok, mode):
     """Machine-readable record of this run (eaglefix_metrics.json) + one line per run appended to
     eaglefix_history.jsonl -> error counts per iteration for the documentation."""
@@ -2170,7 +2211,7 @@ def write_metrics(d, proj, esch, ebrd, fails, selftest_ok, mode):
         'fixer_md5': hashlib.md5(open(os.path.abspath(__file__), 'rb').read()).hexdigest()[:10],
         'eagle_sch': os.path.basename(esch) if esch else None, 'eagle_brd': os.path.basename(ebrd) if ebrd else None,
         'qc': 'PASS' if not fails else 'FAIL', 'qc_findings': fails,
-        'selftest': selftest_ok, 'metrics': METRICS,
+        'selftest': selftest_ok, 'metrics': METRICS, 'warnings': dict(WARNINGS),
     }
     try:
         with open(os.path.join(d, 'eaglefix_metrics.json'), 'w', encoding='utf-8') as f:
@@ -2483,6 +2524,11 @@ def main():
             progress(55, 'Quality control: self-check')
         st = selftest(d, proj, cli, esch, ebrd) if (a.selftest and has_pcb and ebrd) else None
         progress(88, 'Writing the report')
+        if has_pcb:
+            try:
+                check_3d_models(pcb)
+            except Exception as ex:
+                R.p(f'3D model check failed: {ex}')
         fails = qc_verdict(st, geom)
         write_metrics(d, proj, esch, ebrd, fails, st, 'verify')
         if has_pcb and not a.no_render:
@@ -2559,6 +2605,11 @@ def main():
     if (a.selftest or not a.dry_run) and has_pcb and ebrd:
         progress(80, 'Quality control: self-check')
         st = selftest(d, proj, cli, esch, ebrd)
+    if has_pcb and not a.dry_run:
+        try:
+            check_3d_models(pcb)
+        except Exception as ex:
+            R.p(f'3D model check failed: {ex}')
     fails = qc_verdict(st, geom) if not a.dry_run else []
     if not a.dry_run:
         progress(90, 'Writing the report')

@@ -21,7 +21,7 @@ import wx
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-VERSION = '0.9.4'
+VERSION = '0.9.5'
 
 _ACTIVE = []          # keep running jobs referenced after the PCB frame closes
 
@@ -469,18 +469,34 @@ class ImportJob:
         if d is not None:
             d.stop_flag = True
 
+    def _warnings(self):
+        """Non-blocking warnings of the run (from eaglefix_metrics.json) as one line for the banner."""
+        try:
+            import json
+            w = json.load(open(os.path.join(self.target, 'eaglefix_metrics.json'), encoding='utf-8')).get('warnings') or {}
+        except Exception:
+            return ''
+        out = []
+        if w.get('no_3d_model'):
+            out.append(f"{w['no_3d_model']} footprints have no 3D model (Eagle designs carry none - the 3D view "
+                       f"shows bare pads; assign models in the footprint properties if you need them)")
+        if w.get('3d_model_not_found'):
+            out.append(f"{w['3d_model_not_found']} footprints point to a 3D model file that is not found")
+        return ('\n\nWarning: ' + '; '.join(out) + '.') if out else ''
+
     def _finish(self, rc):
         self._stop_driver()
         wx.CallLater(500, self._save_log)
+        warn = self._warnings()
         rep = os.path.join(self.target, 'eaglefix_report.md')
         if rc == 0:
             self.win.finish(True, 'Done - QC PASS',
                             'The KiCad project matches the Eagle source. Open the schematic or the PCB below; '
-                            'in the PCB editor press B to refill the zones.')
+                            'in the PCB editor press B to refill the zones.' + warn)
         elif rc == 1:
             self.win.finish(False, 'Done - QC FAIL: please check before you use it',
                             'The project was converted and fixed, but the quality control found differences '
-                            'from the Eagle source. They are listed under "QC VERDICT" in the report.')
+                            'from the Eagle source. They are listed under "QC VERDICT" in the report.' + warn)
         elif rc == 3:
             self.win.finish(False, 'Done - QC self-check failed',
                             'The quality control could not prove itself on this design, so the result is not '
@@ -609,10 +625,28 @@ class Eagle2KiCadImport(pcbnew.ActionPlugin):
                                   'Eagle Exhumer', wx.ICON_WARNING)
                     return
         name = os.path.splitext(os.path.basename(src))[0]
-        target = os.path.join(os.path.dirname(src), name + '_kicad')
-        k = 2
-        while os.path.isdir(target) and os.listdir(target):
-            target = os.path.join(os.path.dirname(src), f'{name}_kicad_{k}'); k += 1
+
+        def free(base):
+            t, k = os.path.join(base, name + '_kicad'), 2
+            while os.path.isdir(t) and os.listdir(t):
+                t = os.path.join(base, f'{name}_kicad_{k}'); k += 1
+            return t
+        target = free(os.path.dirname(src))
+        dlg = wx.MessageDialog(None, f'Where should the new KiCad project go?\n\n'
+                                     f'Suggested: a new sub-folder next to the Eagle file\n{target}',
+                               'Eagle Exhumer - destination', wx.YES_NO | wx.CANCEL | wx.ICON_QUESTION)
+        dlg.SetYesNoCancelLabels('Use this folder', 'Choose another folder...', 'Cancel')
+        ans = dlg.ShowModal(); dlg.Destroy()
+        if ans == wx.ID_CANCEL:
+            return
+        if ans == wx.ID_NO:
+            dd = wx.DirDialog(None, 'Folder for the new KiCad project (a sub-folder is created inside it '
+                                    'if it is not empty)', defaultPath=os.path.dirname(src),
+                              style=wx.DD_DEFAULT_STYLE)
+            if dd.ShowModal() != wx.ID_OK:
+                dd.Destroy(); return
+            base = dd.GetPath(); dd.Destroy()
+            target = base if (os.path.isdir(base) and not os.listdir(base)) else free(base)
         os.makedirs(target, exist_ok=True)
         job = ImportJob(mgr, mid, src, target)
         wx.CallAfter(job.start)        # leave the PCB frame's event handler first: KiCad closes it

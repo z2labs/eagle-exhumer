@@ -42,7 +42,7 @@ Manual install also works: copy the `plugins/` folder to `Documents/KiCad/10.0/s
 
 Open the **PCB Editor from the KiCad project manager**, not as a standalone app, then click the tombstone.
 
-- **One-click import (Windows).** Pick the Eagle `.sch` or `.brd`. Eagle Exhumer then runs the whole chain unattended:
+- **One-click import (Windows).** Pick the Eagle `.sch` or `.brd`, then the destination: a new `<design>_kicad` sub-folder next to the Eagle file, or any folder you choose. Eagle Exhumer then runs the whole chain unattended:
   1. drives KiCad's own *File → Import Non-KiCad Project → EAGLE*, filling in the dialogs and auto-matching layers;
   2. saves the project to `<design>_kicad/`;
   3. fixes it and runs the check;
@@ -110,6 +110,7 @@ Click **Report a problem...** in the Eagle Exhumer window. It packs a diagnostic
 - EAGLE designs carry no 3D models, so renders show the bare board.
 - A reference collision stays a FAIL until you rename one of the parts.
 - PWR_FLAG placement is not yet netlist-verified.
+- No 3D models: EAGLE designs carry none. The report lists the footprints without a model as a warning, not a failure.
 - Design-rule violations that exist in the Eagle original stay. The tool translates the design; it does not redesign it.
 - This is a legacy SWIG Action Plugin. KiCad plans to replace that API, so a port to the IPC API will be needed for KiCad 11.
 
