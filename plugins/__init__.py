@@ -21,7 +21,7 @@ import wx
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-VERSION = '0.9.3'
+VERSION = '0.9.4'
 
 _ACTIVE = []          # keep running jobs referenced after the PCB frame closes
 
@@ -360,6 +360,7 @@ class ImportJob:
         from win_dialogs import DialogDriver
         # file dialog, destination dialog, then the layer-mapping dialog (opens BEHIND the
         # main window in KiCad 10.0.5 -> looks like a freeze): brought to front + auto-matched
+        # the driver keeps confirming KiCad's post-import info boxes until the whole run is over
         self.driver = DialogDriver([self.src, self.target], log=self.log, layer_mapping=True)
         self.driver.start()
         wx.CallAfter(self._run_import)
@@ -375,13 +376,11 @@ class ImportJob:
 
     def _run_import(self):
         t0 = time.time()
-        try:
-            _menu(self.mgr, self.mid)        # returns when KiCad finished the import (NOT saved!)
-        finally:
-            self.driver.stop_flag = True
+        _menu(self.mgr, self.mid)            # returns when KiCad finished the import (NOT saved!)
         # (pcbnew.GetSettingsManager() is not usable here: the PCB frame that ran the plugin is gone)
         if not os.path.isfile(self.pro) or not self._editor_frames():
             self.log('\nImport cancelled or failed (no imported project / editors found).')
+            self._stop_driver()
             self.win.finish(False, 'Stopped - the KiCad import did not finish',
                             'KiCad did not produce the imported project (cancelled, or an import dialog was '
                             'closed). Nothing was changed. Try again, or use "Report a problem...".', can_open=False)
@@ -402,6 +401,7 @@ class ImportJob:
             wx.CallLater(500, self._close_editors_then_fix, tries + 1); return
         if missing:
             self.log(f'\nNot saved by KiCad: {missing} - save the editors manually, then run the fix-only .bat')
+            self._stop_driver()
             self.win.finish(False, 'Stopped - KiCad did not save the imported project',
                             'Save the schematic and the PCB editor (Ctrl+S), then click the Eagle Exhumer button '
                             'and choose "Fix + check the OPEN project".', can_open=False)
@@ -464,7 +464,13 @@ class ImportJob:
         except Exception:
             pass
 
+    def _stop_driver(self):
+        d = getattr(self, 'driver', None)
+        if d is not None:
+            d.stop_flag = True
+
     def _finish(self, rc):
+        self._stop_driver()
         wx.CallLater(500, self._save_log)
         rep = os.path.join(self.target, 'eaglefix_report.md')
         if rc == 0:

@@ -33,6 +33,20 @@ def _dialogs(pid):
     U.EnumWindows(EnumProc(cb), 0)
     return out
 
+def _top_windows(pid):
+    out = []
+    def cb(h, _):
+        p = wintypes.DWORD(); U.GetWindowThreadProcessId(h, ctypes.byref(p))
+        if p.value == pid and U.IsWindowVisible(h):
+            out.append(h)
+        return True
+    U.EnumWindows(EnumProc(cb), 0)
+    return out
+
+def _text(dlg):
+    """The message text of a message-box-like dialog (its static texts)."""
+    return ' '.join(t for t in (_title(c).strip() for c in _children(dlg) if _cls(c) == 'Static') if t)
+
 def _children(h):
     out = []
     def cb(c, _):
@@ -57,14 +71,26 @@ def _name_edit(dlg):
 class DialogDriver(threading.Thread):
     """steps: list of paths; the n-th native file/folder dialog gets the n-th path + OK."""
 
-    def __init__(self, steps, log=print, timeout=180, layer_mapping=False, pid=None):
+    def __init__(self, steps, log=print, timeout=180, layer_mapping=False, pid=None, minimize_frames=False):
         super().__init__(daemon=True)
         self.steps, self.log, self.timeout = list(steps), log, timeout
         self.layer_mapping = layer_mapping
         self.pid = pid or K.GetCurrentProcessId()
         self.seen = set(_dialogs(self.pid))
+        # KiCad opens its schematic + PCB editors during the import: keep them minimized so the
+        # screen does not flicker (frames that existed before - manager, progress window - stay)
+        self.minimize_frames = minimize_frames
+        self.old_frames = set(_top_windows(self.pid))
         self.done = []
         self.stop_flag = False
+
+    def _minimize_new(self):
+        if not self.minimize_frames:
+            return
+        for h in _top_windows(self.pid):
+            if h not in self.old_frames and _cls(h) == 'wxWindowNR' and not U.IsIconic(h):
+                U.ShowWindow(h, 7)                       # SW_SHOWMINNOACTIVE
+                self.old_frames.add(h)
 
     def run(self):
         for path in self.steps:
@@ -88,6 +114,7 @@ class DialogDriver(threading.Thread):
                     break
                 if handled:
                     break
+                self._minimize_new()
                 time.sleep(0.15)
             if not handled:
                 self.log(f'  [dialog] not handled (timeout): {path}')
@@ -115,9 +142,10 @@ class DialogDriver(threading.Thread):
                 self.log('  [layer mapping] auto-match + OK')
                 self._info_ok()
                 return
+            self._minimize_new()
             time.sleep(0.2)
 
-    def _info_ok(self, timeout=300):
+    def _info_ok(self, timeout=1800):
         """KiCad's post-import message box ('layer Milling (46) not mapped ...'): just OK.
         Only a dialog whose sole button-like control is OK (wxID_OK) is touched."""
         t0 = time.time()
@@ -131,6 +159,8 @@ class DialogDriver(threading.Thread):
                     continue
                 self.seen.add(d)
                 time.sleep(0.3)
+                msg = _text(d)
                 U.SendMessageW(ok[0], BM_CLICK, 0, None)
-                self.log(f'  [info "{_title(d)}"] OK')
+                self.log(f'  [KiCad message, confirmed automatically] {msg or _title(d)}')
+            self._minimize_new()
             time.sleep(0.3)
