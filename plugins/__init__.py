@@ -21,7 +21,7 @@ import wx
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-VERSION = '0.9.2'
+VERSION = '0.9.3'
 
 _ACTIVE = []          # keep running jobs referenced after the PCB frame closes
 
@@ -200,11 +200,37 @@ class LogWindow(wx.Frame):
         self.timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, self._tick, self.timer)
         self.timer.Start(250)
+        self.Bind(wx.EVT_CLOSE, self._on_close)
         self.CentreOnScreen()
         self.Show()
 
+    def _on_close(self, evt):
+        """Always closable - also while a step is still running (the run itself goes on)."""
+        try:
+            self.timer.Stop()
+        except Exception:
+            pass
+        self.Destroy()
+
+    def _modal_open(self):
+        return any(isinstance(w, wx.Dialog) and w.IsShown() and w.IsModal() for w in wx.GetTopLevelWindows())
+
+    def _keep_usable(self):
+        # KiCad disables its frames around its own modal steps and sometimes leaves them disabled;
+        # never let that lock this window (or the project manager) once no dialog is open
+        if self._modal_open():
+            return
+        for w in (self, self.mgr):
+            try:
+                if w and isinstance(w, wx.Window) and not w.IsEnabled():
+                    w.Enable(True)
+            except Exception:
+                pass
+
     # -- progress
     def set_stage(self, pct, label):
+        if not self:
+            return
         self.pct = max(self.pct, min(100, int(pct)))
         if label and label != self.stage.GetLabel():
             self.stage.SetLabel(label)
@@ -216,6 +242,7 @@ class LogWindow(wx.Frame):
     def _tick(self, _evt=None):
         if not self:
             return
+        self._keep_usable()
         el = int(time.time() - self.t0)
         n = 30
         k = self.pct * n // 100
@@ -240,8 +267,10 @@ class LogWindow(wx.Frame):
 
     # -- end state
     def finish(self, ok, headline, detail, can_open=True):
+        if not self:
+            return
         self.done = True
-        self.timer.Stop()
+        self.timer.Start(1000)                 # keep the window usable (see _keep_usable)
         self.gauge.SetValue(100 if ok is not None else self.pct)
         self.stage.SetLabel(headline)
         self.result.SetLabel(detail)
@@ -306,7 +335,7 @@ class ImportJob:
         self.mgr, self.mid, self.src, self.target = manager, eagle_mid, src, target
         self.name = os.path.splitext(os.path.basename(src))[0]
         self.pro = os.path.join(target, self.name + '.kicad_pro')
-        self.win = LogWindow(manager, target, mode_note=self.NOTE)
+        self.win = LogWindow(None, target, mode_note=self.NOTE)
         self.win.mgr = manager
         self.mapped = set()
         self.timer = None
