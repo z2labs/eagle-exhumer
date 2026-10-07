@@ -2490,6 +2490,14 @@ def main():
     has_pcb = os.path.isfile(pcb)
     esch = a.eagle_sch or next((f for f in glob.glob(os.path.join(d, '*.sch')) if eagle_root(f) is not None), None)
     ebrd = a.eagle_brd or next((f for f in glob.glob(os.path.join(d, '*.brd')) if eagle_root(f) is not None), None)
+    for f in (esch, ebrd):
+        if f and eagle_root(f) is None:
+            with open(f, 'rb') as fh:
+                head = fh.read(400)
+            if b'<eagle' not in head and b'<?xml' not in head:
+                sys.exit(f'{os.path.basename(f)}: binary EAGLE file (EAGLE 5.x or older). KiCad and this tool read '
+                         'only EAGLE 6+ XML - open it in EAGLE 6...9 (or Fusion Electronics), save it once, retry.')
+            sys.exit(f'{os.path.basename(f)}: not a readable EAGLE XML file')
     cli = find_kicad_cli(a.kicad_cli)
     # the fix steps are not idempotent (milling, labels, net ties): a second run would duplicate them
     hist = os.path.join(d, 'eaglefix_history.jsonl')
