@@ -1,0 +1,39 @@
+{
+  "$schema": "https://go.kicad.org/pcm/schemas/v1",
+  "name": "Eagle Exhumer",
+  "description": "Eagle to KiCad 10 import that repairs the known importer defects, with strong quality control against the Eagle source.",
+  "description_full": "Eagle Exhumer brings old Autodesk EAGLE designs (6.x-9.x XML .sch/.brd) into KiCad 10.\n\nAfter KiCad's own EAGLE importer it repairs 14 importer defects found on real boards: power nets, Eagle 'nc' pins, lost net names, package copper polygons and printed jumpers (net ties), NPTH rings, via restring, net classes and the Eagle clearance matrix, milling, board outlines drawn inside packages, and more.\n\nEvery conversion ends with a strong quality control against the original Eagle files and a strict PASS / FAIL verdict, with a Markdown report and 3D renders.\n\nWindows: one-click import of a new design. All platforms: fix + check an already imported project (Linux/macOS: experimental).\n\nNot affiliated with or endorsed by Autodesk. EAGLE is a trademark of Autodesk, Inc.",
+  "identifier": "com.github.z2labs.eagle-exhumer",
+  "type": "plugin",
+  "author": {
+    "name": "Z2Labs",
+    "contact": {
+      "github": "https://github.com/z2labs/eagle-exhumer"
+    }
+  },
+  "maintainer": {
+    "name": "Z2Labs",
+    "contact": {
+      "github": "https://github.com/z2labs/eagle-exhumer"
+    }
+  },
+  "license": "GPL-3.0",
+  "resources": {
+    "homepage": "https://github.com/z2labs/eagle-exhumer",
+    "issues": "https://github.com/z2labs/eagle-exhumer/issues"
+  },
+  "tags": [
+    "eagle",
+    "import",
+    "converter",
+    "quality-control",
+    "migration"
+  ],
+  "versions": [
+    {
+      "version": "0.9.0",
+      "status": "testing",
+      "kicad_version": "10.0"
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  pcm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check tag = metadata version
+        run: |
+          V=$(python3 -c "import json;print(json.load(open('metadata.json'))['versions'][0]['version'])")
+          test "v$V" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} != metadata v$V"; exit 1; }
+      - name: Syntax check
+        run: python3 -m py_compile plugins/*.py tools/*.py
+      - name: Build PCM package
+        run: python3 tools/build_pcm.py --download-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/eagle-exhumer-${GITHUB_REF_NAME#v}-pcm.zip"
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/*.zip \
+            dist/metadata-submission/*/metadata.json \
+            --title "Eagle Exhumer ${GITHUB_REF_NAME}" --generate-notes --prerelease
