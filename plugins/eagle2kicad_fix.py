@@ -1133,6 +1133,28 @@ def _fp_copper_polys_to_pads(fp):
             hit = [(p, x, y) for p, x, y in pads if any(_pip(x, y, polys[i][1]) for i in idx)]
             nets = {sx_dump(kid(p, 'net')) if kid(p, 'net') is not None else '' for p, _, _ in hit}
             if not hit or (len({str(p[1]) for p, _, _ in hit}) != 1 and (len(nets) != 1 or nets == {''})):
+                # Eagle 'board mounted 0R': a copper RECTANGLE bridging two pads of different nets
+                # (the pad centres are outside it). KiCad: net tie between those pads.
+                touch = []
+                for p, x, y in pads:
+                    sz = kid(p, 'size')
+                    if sz is None:
+                        continue
+                    hw, hh = float(sz[1]) / 2, float(sz[2]) / 2
+                    rect = [(x - hw, y - hh), (x + hw, y - hh), (x + hw, y + hh), (x - hw, y + hh)]
+                    if any(_poly_touch(rect, polys[i][1]) for i in idx):
+                        touch.append(p)
+                tnets = {sx_dump(kid(p, 'net')) for p in touch if kid(p, 'net') is not None}
+                if len(touch) >= 2 and len(tnets) >= 2:
+                    nums = sorted({str(p[1]) for p in touch})
+                    old = kid(fp, 'net_tie_pad_groups')
+                    groups_old = [str(x) for x in old[1:]] if old is not None else []
+                    if old is not None:
+                        fp.remove(old)
+                    node = ['net_tie_pad_groups'] + [Q(g) for g in groups_old] + [Q(', '.join(nums))]
+                    at_i = next((i for i, k in enumerate(fp) if isinstance(k, list) and k and k[0] in ('fp_line', 'fp_poly', 'fp_text', 'pad')), len(fp))
+                    fp.insert(at_i, node)
+                    n += 1
                 continue                    # no pad (Eagle: no signal either) or pads of different nets
             p0, lx, ly0 = hit[0]
             prims = ['primitives']
@@ -1210,13 +1232,17 @@ def _fp_net_ties(fp):
             par[f(hits[0])] = f(hits[1]); linked = True
     if not linked:
         return 0
+    old = kid(fp, 'net_tie_pad_groups')
+    if old is not None:                      # keep groups added earlier (copper rectangles)
+        for g in old[1:]:
+            nums = [x.strip() for x in str(g).split(',') if x.strip()]
+            for a_ in nums[1:]:
+                par[f(nums[0])] = f(a_)
+        fp.remove(old)
     groups = defaultdict(list)
     for x in list(par):
         groups[f(x)].append(x)
     groups = [sorted(g) for g in groups.values() if len(g) > 1]
-    old = kid(fp, 'net_tie_pad_groups')
-    if old is not None:
-        fp.remove(old)
     node = ['net_tie_pad_groups'] + [Q(', '.join(g)) for g in sorted(groups)]
     idx = next((i for i, k in enumerate(fp) if isinstance(k, list) and k and k[0] in ('fp_line', 'fp_poly', 'fp_text', 'pad')), len(fp))
     fp.insert(idx, node)

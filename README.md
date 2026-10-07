@@ -18,7 +18,7 @@ Eagle Exhumer runs KiCad's own importer, repairs the importer defects listed bel
 | 2 | Eagle `nc` (direction) pins are never connected | open nets (16 on one Olimex board, GND and VCC included) | `nc` → passive where Eagle wires them |
 | 3 | Unlabeled Eagle net names are lost | names gone from the PCB after F8 | global labels, each verified in the netlist |
 | 4 | Package copper polygons with the pad's net | net-less copper → shorts | polygon → custom pad |
-| 5 | Package copper between pads (printed jumper, board 0R) | short | net tie |
+| 5 | Package copper between pads (printed jumper, board 0R: lines or rectangles) | short | net tie |
 | 6 | NPTH holes with a copper ring | short | ring = drill |
 | 7 | Net-less connector shield pads with GND routed in | shorting items | the one net that touches them |
 | 8 | Via diameter ignores the Eagle restring rules | wrong annular ring | drill + 2·clamp(rv·drill) |
