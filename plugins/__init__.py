@@ -21,7 +21,7 @@ import wx
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-VERSION = '0.9.5'
+VERSION = '0.9.6'
 
 _ACTIVE = []          # keep running jobs referenced after the PCB frame closes
 
@@ -36,6 +36,9 @@ def _python():
                     reverse=True)
     cands += [sys.executable, '/usr/bin/python3']
     return next((c for c in cands if os.path.isfile(c) and 'python' in os.path.basename(c).lower()), 'python')
+
+
+from cli_pcb_import import cli_import_pcb
 
 
 def _walk_menu(menu):
@@ -353,17 +356,78 @@ class ImportJob:
     # -- step 1: KiCad's own import
     def start(self):
         _ACTIVE.append(self)
+        self.t_start = time.time()
         self.log(f'Eagle source : {self.src}')
         self.log(f'KiCad project: {self.pro}')
-        self.log('\n1) KiCad Eagle import (File > Import Non-KiCad Project > EAGLE)...')
-        self.stage(3, 'Step 1/3 - KiCad imports the Eagle design')
+        base = os.path.splitext(self.src)[0]
+        self.brd = next((c for c in (base + '.brd', base + '.BRD') if os.path.isfile(c)), None)
+        self.sch = next((c for c in (base + '.sch', base + '.SCH') if os.path.isfile(c)), None)
+        self.import_meta = {'method': 'gui', 'kicad_version': getattr(pcbnew, 'GetBuildVersion', lambda: '?')()}
+        # 1a) the BOARD through kicad-cli: no windows at all
+        self.cli_pcb = None
+        if self.brd:
+            self.stage(2, 'Step 1/3 - Importing the board (kicad-cli, no windows)')
+            self.log('\n1a) kicad-cli pcb import (board)...')
+            import tempfile
+            # NOT inside the target: KiCad's project import insists on an empty destination folder
+            self.tmp_dir = tempfile.mkdtemp(prefix='eagle_exhumer_')
+            tmp_pcb = os.path.join(self.tmp_dir, self.name + '.kicad_pcb')
+            ok, dt, rep = cli_import_pcb(self.brd, tmp_pcb, log=self.log)
+            if ok:
+                self.cli_pcb = tmp_pcb
+                self.import_meta.update(method='cli-pcb+gui-sch', pcb_import_s=round(dt, 2),
+                                        pcb_import_warnings=len(rep.get('warnings') or []))
+            else:
+                self.log('  falling back to the full KiCad GUI import (board + schematic)')
+        # 1b) the SCHEMATIC through KiCad's GUI import (there is no command-line schematic import).
+        #     With the board already done, KiCad only gets the .sch: a copy in a folder without the
+        #     .brd, so no board import, no layer-mapping dialog, no PCB editor flashing up.
+        gui_src = self.src
+        if self.cli_pcb and self.sch:
+            import shutil
+            self.tmp_sch_dir = os.path.join(self.tmp_dir, 'sch'); os.makedirs(self.tmp_sch_dir, exist_ok=True)
+            gui_src = os.path.join(self.tmp_sch_dir, os.path.basename(self.sch))
+            shutil.copy2(self.sch, gui_src)
+        elif self.cli_pcb and not self.sch:
+            gui_src = None                              # board only: nothing for the GUI to do
+        self.gui_src = gui_src
+        if gui_src is None:
+            self.log('  no Eagle schematic - board-only project')
+            self._write_project_from_cli()
+            wx.CallLater(200, self._run_fix)
+            return
+        self.log('\n1b) KiCad Eagle import of the schematic (File > Import Non-KiCad Project > EAGLE)...')
+        self.stage(6, 'Step 1/3 - KiCad imports the schematic')
         from win_dialogs import DialogDriver
-        # file dialog, destination dialog, then the layer-mapping dialog (opens BEHIND the
-        # main window in KiCad 10.0.5 -> looks like a freeze): brought to front + auto-matched
-        # the driver keeps confirming KiCad's post-import info boxes until the whole run is over
-        self.driver = DialogDriver([self.src, self.target], log=self.log, layer_mapping=True)
+        # file dialog, destination dialog, then (full GUI import only) the layer-mapping dialog;
+        # the driver keeps confirming KiCad's info boxes until the whole run is over
+        self.driver = DialogDriver([gui_src, self.target], log=self.log, layer_mapping=not self.cli_pcb)
         self.driver.start()
         wx.CallAfter(self._run_import)
+
+    def _write_project_from_cli(self):
+        """Board-only Eagle design: the project file + the kicad-cli board, no GUI import at all."""
+        import shutil
+        shutil.move(self.cli_pcb, os.path.join(self.target, self.name + '.kicad_pcb'))
+        if not os.path.isfile(self.pro):
+            with open(self.pro, 'w', encoding='utf-8') as f:
+                f.write('{"meta": {"filename": "%s", "version": 3}}\n' % os.path.basename(self.pro))
+
+    def _place_cli_pcb(self):
+        """After the GUI schematic import: the kicad-cli board becomes THE board of the project."""
+        import shutil
+        if not self.cli_pcb:
+            return
+        dst = os.path.join(self.target, self.name + '.kicad_pcb')
+        if os.path.isfile(dst):
+            os.replace(dst, os.path.join(self.target, '_gui_import.kicad_pcb'))   # should not exist; kept
+        shutil.move(self.cli_pcb, dst)
+        rep = self.cli_pcb + '.import.json'
+        if os.path.isfile(rep):
+            shutil.move(rep, os.path.join(self.target, 'eaglefix_pcb_import.json'))
+        self.log(f'  board from kicad-cli placed as {os.path.basename(dst)}')
+        self.cli_pcb = None
+        shutil.rmtree(getattr(self, 'tmp_dir', ''), ignore_errors=True)
 
     def _editor_frames(self):
         out = []
@@ -386,6 +450,7 @@ class ImportJob:
                             'closed). Nothing was changed. Try again, or use "Report a problem...".', can_open=False)
             return
         self.log(f'  KiCad import done in {time.time() - t0:.0f} s')
+        self.import_meta['gui_import_s'] = round(time.time() - t0, 1)
         self.stage(16, 'Step 2/3 - Saving the imported project')
         # KiCad 10.0.5 leaves both editors unsaved -> File > Save in each, then close them
         for f in self._editor_frames():
@@ -395,8 +460,8 @@ class ImportJob:
         wx.CallLater(1500, self._close_editors_then_fix)
 
     def _close_editors_then_fix(self, tries=0):
-        missing = [e for e in ('.kicad_sch', '.kicad_pcb')
-                   if not os.path.isfile(os.path.join(self.target, self.name + e))]
+        need = ('.kicad_sch',) if self.cli_pcb else ('.kicad_sch', '.kicad_pcb')
+        missing = [e for e in need if not os.path.isfile(os.path.join(self.target, self.name + e))]
         if missing and tries < 20:
             wx.CallLater(500, self._close_editors_then_fix, tries + 1); return
         if missing:
@@ -408,7 +473,13 @@ class ImportJob:
             return
         for f in self._editor_frames():
             f.Close()
-        wx.CallLater(1000, self._run_fix)
+        wx.CallLater(1000, self._after_close)
+
+    def _after_close(self, tries=0):
+        if self._editor_frames() and tries < 40:
+            wx.CallLater(500, self._after_close, tries + 1); return
+        self._place_cli_pcb()
+        self._run_fix()
 
     # -- step 2: fix-up in a separate python process
     def _run_fix(self):
@@ -426,7 +497,13 @@ class ImportJob:
                     break
         self.log('\n2) eagle2kicad_fix...')
         self.stage(self.fix_base, f'{self.fix_step} - Repair and quality control')
+        import json as _json
+        meta = dict(getattr(self, 'import_meta', {}) or {})
+        if getattr(self, 't_start', None):
+            meta['import_total_s'] = round(time.time() - self.t_start, 1)
         cmd = [_python(), '-u', os.path.join(HERE, 'eagle2kicad_fix.py'), self.target] + args
+        if meta:
+            cmd += ['--import-meta', _json.dumps(meta)]
         flags = 0x08000000 if os.name == 'nt' else 0
         self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                      encoding='utf-8', errors='replace', creationflags=flags, cwd=self.target)
@@ -666,12 +743,13 @@ def _batch_dir():
 
 
 def _batch_poll(req, done, name, t0=None, tries=[0]):
+    need = getattr(_batch_poll, 'need', 2)
     t0 = t0 or time.time()
     try:
         frames = [w for w in wx.GetTopLevelWindows() if isinstance(w, wx.Frame) and name in w.GetTitle()
                   and _find_item(w, lambda l: l.endswith('\tCtrl+S')) is not None]
         modal = any(isinstance(w, wx.Dialog) and w.IsShown() for w in wx.GetTopLevelWindows())
-        if len(frames) >= 2 and not modal and all(f.IsEnabled() for f in frames):
+        if len(frames) >= need and not modal and all(f.IsEnabled() for f in frames):
             tries[0] += 1
             if tries[0] >= 3:
                 for f in frames:
@@ -695,7 +773,9 @@ def _batch_hook():
         if os.path.isfile(req):
             import json
             with open(req) as fh:
-                name = json.load(fh)['name']
+                rq = json.load(fh)
+            name = rq['name']
+            _batch_poll.need = int(rq.get('editors', 2))
             if not getattr(sys, '_eagle2kicad_batch_hook', False):
                 sys._eagle2kicad_batch_hook = True
                 wx.CallLater(1000, _batch_poll, req, req[:-5] + '.done', name)

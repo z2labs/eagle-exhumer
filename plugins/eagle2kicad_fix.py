@@ -28,7 +28,7 @@ What it fixes (each step logged in eaglefix_report.md):
   VERIFY  Eagle netlist (ground truth) vs KiCad schematic netlist and PCB pad nets:
           reports every merged (short) and split (open) net.
 """
-import argparse, datetime, glob, json, os, re, shutil, subprocess, sys, uuid
+import argparse, datetime, glob, json, os, re, shutil, subprocess, sys, time, uuid
 import xml.etree.ElementTree as ET
 from collections import defaultdict, Counter
 
@@ -2201,6 +2201,10 @@ def check_3d_models(pcb_path):
         R.p('  model not found: ' + ', '.join(sorted(broken)[:40]))
 
 
+IMPORT_META = {}
+T_START = __import__('time').time()
+
+
 def write_metrics(d, proj, esch, ebrd, fails, selftest_ok, mode):
     """Machine-readable record of this run (eaglefix_metrics.json) + one line per run appended to
     eaglefix_history.jsonl -> error counts per iteration for the documentation."""
@@ -2212,6 +2216,8 @@ def write_metrics(d, proj, esch, ebrd, fails, selftest_ok, mode):
         'eagle_sch': os.path.basename(esch) if esch else None, 'eagle_brd': os.path.basename(ebrd) if ebrd else None,
         'qc': 'PASS' if not fails else 'FAIL', 'qc_findings': fails,
         'selftest': selftest_ok, 'metrics': METRICS, 'warnings': dict(WARNINGS),
+        'timing_s': dict(TIMING), 'total_s': round(time.time() - T_START, 1),
+        'import': IMPORT_META,
     }
     try:
         with open(os.path.join(d, 'eaglefix_metrics.json'), 'w', encoding='utf-8') as f:
@@ -2412,8 +2418,18 @@ def selftest(d, proj, cli, esch, ebrd):
 
 # --------------------------------------------------------------------------- main
 
+TIMING = {}          # stage -> seconds (benchmark / metrics)
+_T_LAST = [None, None]
+
+
 def progress(pct, label):
-    """Machine-readable progress line for the plugin window (stripped from the visible log)."""
+    """Machine-readable progress line for the plugin window (stripped from the visible log).
+    Also closes the timing of the previous stage."""
+    import time as _t
+    now = _t.time()
+    if _T_LAST[0] is not None:
+        TIMING[_T_LAST[1]] = round(TIMING.get(_T_LAST[1], 0) + now - _T_LAST[0], 2)
+    _T_LAST[0], _T_LAST[1] = now, label
     print(f'@@PROGRESS {int(pct)} {label}', flush=True)
 
 
@@ -2430,7 +2446,13 @@ def main():
     ap.add_argument('--selftest', action='store_true', help='inject faults into a copy, verifier must catch all')
     ap.add_argument('--refix', action='store_true',
                     help='run the fix steps again on a project that was already fixed (normally: verify only)')
+    ap.add_argument('--import-meta', help='JSON with how/when the KiCad import was made (recorded in the metrics)')
     a = ap.parse_args()
+    if a.import_meta:
+        try:
+            IMPORT_META.update(json.loads(a.import_meta))
+        except Exception as ex:
+            print(f'--import-meta ignored: {ex}')
 
     d = os.path.abspath(a.project_dir)
     pros = glob.glob(os.path.join(d, '*.kicad_pro'))
@@ -2530,11 +2552,11 @@ def main():
             except Exception as ex:
                 R.p(f'3D model check failed: {ex}')
         fails = qc_verdict(st, geom)
-        write_metrics(d, proj, esch, ebrd, fails, st, 'verify')
         if has_pcb and not a.no_render:
             progress(90, '3D renders (about a minute)')
             render_3d(cli, pcb, d)
         progress(100, 'Done')
+        write_metrics(d, proj, esch, ebrd, fails, st, 'verify')
         VIEW.close(); R.save(os.path.join(d, 'eaglefix_report.md'))
         sys.exit(3 if st is False else (1 if fails else 0))
 
@@ -2613,11 +2635,12 @@ def main():
     fails = qc_verdict(st, geom) if not a.dry_run else []
     if not a.dry_run:
         progress(90, 'Writing the report')
-        write_metrics(d, proj, esch, ebrd, fails, st, 'fix')
         if has_pcb and not a.no_render:
             progress(92, '3D renders (about a minute)')
             render_3d(cli, pcb, d)
     progress(100, 'Done')
+    if not a.dry_run:
+        write_metrics(d, proj, esch, ebrd, fails, st, 'fix')
     VIEW.close()
     R.save(os.path.join(d, 'eaglefix_report.md'))
     print('\nReport: ' + os.path.join(d, 'eaglefix_report.md'))

@@ -121,6 +121,8 @@ class DialogDriver(threading.Thread):
                 return
         if self.layer_mapping:
             self._layer_mapping()
+        else:
+            self._info_ok()                              # keep confirming KiCad info boxes until stopped
 
     def _layer_mapping(self, timeout=600):
         """KiCad's 'Edit Mapping of Imported Layers' dialog: bring to front, Auto-Match, OK."""

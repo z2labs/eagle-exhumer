@@ -11,7 +11,7 @@ opens in the browser and the user drags the zip into it.
 """
 import argparse, datetime, glob, json, os, platform, sys, urllib.parse, webbrowser, zipfile
 
-VERSION = '0.9.5'
+VERSION = '0.9.6'
 REPO = 'https://github.com/z2labs/eagle-exhumer'
 
 RUN_FILES = ('eaglefix_report.md', 'eaglefix_metrics.json', 'eaglefix_history.jsonl',
