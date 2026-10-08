@@ -68,16 +68,18 @@ Use KiCad's own Python (Windows: `C:\Program Files\KiCad\10.0\bin\python.exe`). 
 
 19 real designs: 11 open-hardware boards from [Olimex OLINUXINO](https://github.com/OLIMEX/OLINUXINO/tree/master/HARDWARE), 7 boards from Zoltan Doczi's own PCB designs and one private 4-sheet EAGLE 9.6.2 design — 3,214 parts, 14,044 pads, 7,610 vias, 1 to 6 copper layers. **18 of 19 pass the quality control**; the one FAIL is a reference collision (`GND` vs `GND0`) that needs a human decision.
 
-KiCad 10.0.6 native import vs. after Eagle Exhumer, 18 batch designs:
+KiCad 10.0.6 native import vs. after Eagle Exhumer 0.9.7, 18 batch designs (full re-run of the corpus, 2026-10-08):
 
 | | native import | after fix |
 |---|---|---|
 | open (split) nets in the schematic | 49 | **0** |
 | lost Eagle net names | 306 | **0** |
-| ERC errors | 367 | 13 |
-| DRC shorting items | 347 | 65 |
+| ERC errors | 367 | 16 |
+| DRC shorting items | 347 | 26 |
 
-Remaining DRC items are properties of the original EAGLE designs (e.g. clearance values the original violates), which the conversion carries over rather than redesigning.
+All 18 pass the quality control with a 6/6 self-check. The remaining ERC errors are 1–3 `power_pin_not_driven` / `pin_to_pin` items per board where the schematic has no explicit power source (a PWR_FLAG decision for a human; the count varies by ±1 between runs). Remaining DRC items are properties of the original EAGLE designs (e.g. clearance values the original violates, printed jumpers), which the conversion carries over rather than redesigning.
+
+Timing on a desktop PC: import 23–31 s per design (board via `kicad-cli` 0.4–1.1 s, schematic via KiCad's GUI importer 22–29 s), fix + quality control + 3D renders 52–206 s depending on board size.
 
 ## Gallery
 
