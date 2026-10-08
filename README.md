@@ -79,6 +79,8 @@ KiCad 10.0.6 native import vs. after Eagle Exhumer 0.9.7, 18 batch designs (full
 
 All 18 pass the quality control with a 6/6 self-check. The remaining ERC errors are 1–3 `power_pin_not_driven` / `pin_to_pin` items per board where the schematic has no explicit power source (a PWR_FLAG decision for a human; the count varies by ±1 between runs). Remaining DRC items are properties of the original EAGLE designs (e.g. clearance values the original violates, printed jumpers), which the conversion carries over rather than redesigning.
 
+**Test report:** [docs/test-report-2026-10-08.pdf](docs/test-report-2026-10-08.pdf) — per-design results, the history of the four full corpus runs (14/18 → 18/18, shorting items 65 → 77 → 26), what remains after the fix and why, timings, renders.
+
 Timing on a desktop PC: import 23–31 s per design (board via `kicad-cli` 0.4–1.1 s, schematic via KiCad's GUI importer 22–29 s), fix + quality control + 3D renders 52–206 s depending on board size.
 
 ## Gallery
