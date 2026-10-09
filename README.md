@@ -78,7 +78,7 @@ KiCad 10.0.6 native import vs. after Eagle Exhumer 0.9.7, 18 batch designs (full
 | ERC errors | 367 | 16 |
 | DRC shorting items | 347 | 26 |
 
-All 18 pass the quality control with a 6/6 self-check. The remaining ERC errors are 1–3 `power_pin_not_driven` / `pin_to_pin` items per board where the schematic has no explicit power source (a PWR_FLAG decision for a human; the count varies by ±1 between runs). Remaining DRC items are properties of the original EAGLE designs (e.g. clearance values the original violates, printed jumpers), which the conversion carries over rather than redesigning.
+All 18 pass the quality control with a 6/6 self-check. Found after that run and fixed in 0.9.8: two of the 18 (iMX233-OLinuXino-Micro Rev C/D, 2-layer boards with a 4-layer EAGLE rule set) had been imported as 4-layer KiCad boards with empty inner layers - the quality control had no layer-count item. It has one now (defect #15), and the corpus passes 18/18 with it. The remaining ERC errors are 1–3 `power_pin_not_driven` / `pin_to_pin` items per board where the schematic has no explicit power source (a PWR_FLAG decision for a human; the count varies by ±1 between runs). Remaining DRC items are properties of the original EAGLE designs (e.g. clearance values the original violates, printed jumpers), which the conversion carries over rather than redesigning.
 
 **Test report:** [docs/test-report-2026-10-08.pdf](docs/test-report-2026-10-08.pdf) — per-design results, the history of the four full corpus runs (14/18 → 18/18, shorting items 65 → 77 → 26), what remains after the fix and why, timings, renders.
 
