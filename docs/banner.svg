@@ -376,7 +376,9 @@
   <path d="M858,434 L812,398" stroke="#8b5a2b" stroke-width="5" stroke-linecap="round"/>
   <circle cx="808" cy="394" r="24" fill="url(#magic)"/><polygon points="810.6,379.2 812.7,389.5 822.9,391.9 813.7,397.1 814.6,407.5 806.9,400.4 797.2,404.4 801.6,394.9 794.8,387.0 805.2,388.2" fill="#ffe14d" opacity="1" stroke="#fff6b0" stroke-width="2"/>
   <!-- hair (back) -->
-  <path d="M912,392 C900,440 912,470 925,476 L990,476 C1004,460 1010,430 998,392 Z" fill="#c9673a"/>
+  <path d="M918,392 C904,425 902,462 914,488 C924,484 930,462 930,430 Z" fill="#c9673a"/>
+  <path d="M992,392 C1006,425 1010,462 998,488 C988,484 982,462 982,430 Z" fill="#c9673a"/>
+  <rect x="947" y="440" width="16" height="14" rx="5" fill="#ffd9c2"/>
   <!-- head -->
   <circle cx="955" cy="410" r="40" fill="#ffe1cc"/>
   <!-- fringe -->
