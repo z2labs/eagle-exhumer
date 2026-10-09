@@ -234,7 +234,8 @@ class LogWindow(wx.Frame):
     def set_stage(self, pct, label):
         if not self:
             return
-        self.pct = max(self.pct, min(100, int(pct)))
+        if pct is not None:
+            self.pct = max(self.pct, min(100, int(pct)))
         if label and label != self.stage.GetLabel():
             self.stage.SetLabel(label)
             if not any(isinstance(w, wx.Dialog) and w.IsShown() for w in wx.GetTopLevelWindows()):
@@ -504,8 +505,9 @@ class ImportJob:
         cmd = [_python(), '-u', os.path.join(HERE, 'eagle2kicad_fix.py'), self.target] + args
         if meta:
             cmd += ['--import-meta', _json.dumps(meta)]
+        cmd += ['--layers', 'ask']                 # decisions the fixer cannot take alone come back as @@ASK
         flags = 0x08000000 if os.name == 'nt' else 0
-        self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                      encoding='utf-8', errors='replace', creationflags=flags, cwd=self.target)
         threading.Thread(target=self._pump, daemon=True).start()
 
@@ -523,6 +525,9 @@ class ImportJob:
                 except ValueError:
                     pass
                 continue
+            if line.startswith('@@ASK '):
+                self._answer_ask(line[6:])
+                continue
             if not line.strip():
                 if blank:
                     continue
@@ -532,6 +537,45 @@ class ImportJob:
             self.log(line)
         rc = self.proc.wait()
         wx.CallAfter(self._finish, rc)
+
+    def _answer_ask(self, payload):
+        """The fixer stopped at a decision it must not take alone (e.g. empty inner copper layers).
+        Show it to the user on the GUI thread, write the chosen option id back on the fixer's stdin.
+        Anything that goes wrong answers with the fixer's own default (the non-destructive choice)."""
+        import json as _json
+        try:
+            q = _json.loads(payload)
+        except Exception:
+            q = {}
+        default = q.get('default', '')
+        opts = q.get('options') or [[default, 'OK']]
+        done = threading.Event(); result = [default]
+
+        def show():
+            try:
+                self.stage(None, 'Waiting for your decision...')
+                text = q.get('text', ''); title = 'Eagle Exhumer - ' + q.get('title', 'decision')
+                parent = self.win if self.win else None     # the log window may have been closed
+                if len(opts) >= 2:
+                    dlg = wx.MessageDialog(parent, text, title, wx.YES_NO | wx.ICON_QUESTION)
+                    dlg.SetYesNoLabels(opts[0][1], opts[1][1])
+                    r = dlg.ShowModal(); dlg.Destroy()
+                    result[0] = opts[0][0] if r == wx.ID_YES else opts[1][0]
+                else:
+                    wx.MessageBox(text, title, wx.OK | wx.ICON_INFORMATION, parent)
+                    result[0] = opts[0][0]
+            except Exception as ex:
+                self.log(f'  decision dialog failed ({ex}) -> {default}')
+                result[0] = default
+            finally:
+                done.set()
+        wx.CallAfter(show)
+        done.wait(timeout=840)                         # the fixer gives up after 900 s and takes its default
+        self.log(f'  decision "{q.get("title", "?")}": {result[0]}')
+        try:
+            self.proc.stdin.write(result[0] + '\n'); self.proc.stdin.flush()
+        except Exception as ex:
+            self.log(f'  could not send the decision to the fixer ({ex}) - it falls back to its default')
 
     # -- step 3: open the fixed project in the editors
     def _save_log(self):

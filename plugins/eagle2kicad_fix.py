@@ -1692,42 +1692,103 @@ def _kicad_layer_items(pcbnew, board):
     return cnt
 
 
+LAYER_MODE = 'auto'      # auto | ask | keep | trim  (--layers)
+
+
+def ask_user(kind, title, text, options, default):
+    """Interactive decision point. The plugin GUI runs this script as a subprocess and answers on
+    stdin; a human at a terminal types the option id. Protocol: one line
+    `@@ASK <json>` on stdout, one line with the option id on stdin. Any failure (no stdin, EOF,
+    timeout, unknown answer) returns `default`, which is always the non-destructive choice."""
+    import threading
+    msg = json.dumps(dict(kind=kind, title=title, text=text, options=options, default=default))
+    print('@@ASK ' + msg, flush=True)
+    ans = [None]
+
+    def _read():
+        try:
+            ans[0] = sys.stdin.readline()
+        except Exception:
+            ans[0] = ''
+    t = threading.Thread(target=_read, daemon=True)
+    t.start(); t.join(timeout=900)
+    a = (ans[0] or '').strip().lower()
+    ids = {o[0] for o in options}
+    if a not in ids:
+        R.p(f'no answer for "{title}" -> {default}')
+        return default
+    R.p(f'user decision for "{title}": {a}')
+    return a
+
+
 def trim_empty_inner_layers(pcb_path, ebrd, dry):
     """KiCad's Eagle importer sizes the copper stack from the Eagle design-rule 'layerSetup', which
     may declare more layers than the board uses. The result is a 4-layer KiCad project of a 2-layer
     board: the fab quotes 4 layers. When the Eagle source uses no inner layer and the KiCad inner
-    layers are empty, the stack is reduced to 2 layers. Partial cases (some inner layers used) are
-    left alone and reported by the quality control."""
+    layers are empty, the stack is reduced to 2 layers (asked first in --layers ask mode). Every
+    other mismatch is only reported here and failed by the quality control: no guessing."""
     R.h('PCB: copper layer count vs the Eagle source')
     try:
         import pcbnew
     except ImportError:
         R.p('pcbnew module not available - skipped'); return
-    brd = eagle_root(ebrd).find('drawing/board')
-    e_inner = eagle_inner_layers(brd)
-    board = pcbnew.LoadBoard(pcb_path)
-    n = board.GetCopperLayerCount()
-    setup = brd.find('designrules/param[@name="layerSetup"]')
-    R.p(f'Eagle: layerSetup {setup.get("value") if setup is not None else "?"}, copper layers in use {2 + len(e_inner)}; KiCad: {n} copper layers')
-    if n <= 2 or e_inner:
-        return
-    cnt = _kicad_layer_items(pcbnew, board)
-    inner = [l for l in board.GetEnabledLayers().CuStack() if l not in (pcbnew.F_Cu, pcbnew.B_Cu)]
-    busy = [board.GetLayerName(l) for l in inner if cnt.get(l)]
-    if busy:
-        R.p(f'inner layers carry items on the KiCad side ({", ".join(busy)}) although the Eagle source uses none - left for the quality control')
-        return
-    R.p(f'{n - 2} empty inner layer(s) removed -> 2-layer board (as in the Eagle source)')
-    if not dry:
-        board.SetCopperLayerCount(2)
+    try:
+        brd = eagle_root(ebrd).find('drawing/board')
+        e_inner = eagle_inner_layers(brd)
+        board = pcbnew.LoadBoard(pcb_path)
+        n = board.GetCopperLayerCount()
+        setup = brd.find('designrules/param[@name="layerSetup"]')
+        ls = setup.get('value') if setup is not None else '?'
+        e_cu = 2 + len(e_inner)
+        R.p(f'Eagle: layerSetup {ls}, copper layers in use {e_cu}; KiCad: {n} copper layers')
+        if n == e_cu:
+            return
+        cnt = _kicad_layer_items(pcbnew, board)
+        inner = [l for l in board.GetEnabledLayers().CuStack() if l not in (pcbnew.F_Cu, pcbnew.B_Cu)]
+        busy = [board.GetLayerName(l) for l in inner if cnt.get(l)]
+        if n < e_cu:
+            R.p(f'KiCad has FEWER copper layers than the Eagle board uses ({n} < {e_cu}) - not touched, the quality control fails this')
+            if LAYER_MODE == 'ask':
+                ask_user('layers', 'Copper layer count', f'The EAGLE board uses {e_cu} copper layers (Eagle layers '
+                         f'{sorted(int(x) for x in eagle_copper_layers(brd))}), the imported KiCad board has only {n}. '
+                         'Eagle Exhumer does not add layers; the quality control will report a FAIL. Please check the import.',
+                         [['ok', 'OK']], 'ok')
+            return
+        if e_inner or busy:
+            why = (f'the Eagle board uses inner layer(s) {sorted(e_inner)}' if e_inner else '') + \
+                  (' and ' if e_inner and busy else '') + (f'KiCad inner layer(s) {", ".join(busy)} carry items' if busy else '')
+            R.p(f'{n} KiCad copper layers vs {e_cu} used by Eagle, but {why} - not touched, the quality control fails this')
+            if LAYER_MODE == 'ask':
+                ask_user('layers', 'Copper layer count', f'KiCad imported {n} copper layers, the EAGLE board uses {e_cu}, '
+                         f'but {why}. Eagle Exhumer cannot decide this safely and leaves the stack as it is; '
+                         'the quality control will report a FAIL. Fix the layer setup in KiCad (File > Board Setup) by hand.',
+                         [['ok', 'OK']], 'ok')
+            return
+        # the clean case: a 2-layer board declared as more in the Eagle rule set, nothing on the inner layers
+        decision = {'auto': 'trim', 'trim': 'trim', 'keep': 'keep'}.get(LAYER_MODE)
+        if decision is None:
+            decision = ask_user('layers', 'Copper layer count',
+                                f'The EAGLE board is a {e_cu}-layer board (rule set says {ls}), but KiCad imported it with {n} copper layers '
+                                f'and the {n - 2} inner layer(s) are empty. A fab would quote {n} layers.\n\n'
+                                f'Remove the empty inner layers and make it a {e_cu}-layer KiCad board?',
+                                [['trim', f'Remove, make it {e_cu} layers'], ['keep', f'Keep {n} layers']], 'keep')
+        if decision != 'trim':
+            R.p(f'kept {n} copper layers on request - the quality control reports the mismatch')
+            return
+        R.p(f'{n - 2} empty inner layer(s) removed -> {e_cu}-layer board (as in the Eagle source)')
+        if dry:
+            return
+        board.SetCopperLayerCount(e_cu)
         pcbnew.SaveBoard(pcb_path, board)
-        # KiCad keeps a stale (stackup ...) block if one exists: it would still list 4 copper layers
+        # KiCad keeps a stale (stackup ...) block if one exists: it would still list the old copper layers
         tree = read_sx(pcb_path)
         setup_ = kid(tree, 'setup')
         if setup_ is not None:
             st = kid(setup_, 'stackup')
             if st is not None:
                 setup_.remove(st); write_sx(pcb_path, tree)
+    except Exception as ex:
+        R.p(f'layer step failed ({ex}) - board left as imported, the quality control decides')
 
 
 def promote_fp_edge_cuts(pcb_path, dry):
@@ -2585,7 +2646,12 @@ def main():
     ap.add_argument('--refix', action='store_true',
                     help='run the fix steps again on a project that was already fixed (normally: verify only)')
     ap.add_argument('--import-meta', help='JSON with how/when the KiCad import was made (recorded in the metrics)')
+    ap.add_argument('--layers', choices=('auto', 'ask', 'keep', 'trim'), default='auto',
+                    help='empty inner copper layers of a board whose Eagle source uses none: auto = remove, '
+                         'ask = ask on stdin (@@ASK protocol, used by the plugin GUI), keep = leave, trim = remove')
     a = ap.parse_args()
+    global LAYER_MODE
+    LAYER_MODE = a.layers
     if a.import_meta:
         try:
             IMPORT_META.update(json.loads(a.import_meta))
