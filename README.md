@@ -125,6 +125,7 @@ Click **Report a problem...** in the Eagle Exhumer window. It packs a diagnostic
 - PWR_FLAG placement is not yet netlist-verified.
 - No 3D models: EAGLE designs carry none. The report lists the footprints without a model as a warning, not a failure.
 - Design-rule violations that exist in the Eagle original stay. The tool translates the design; it does not redesign it.
+- KiCad 10 can show "cannot open ...\\sym-lib-table" during the import of large multi-sheet designs, although the file is written correctly. Eagle Exhumer recognises this message, confirms it, notes it in the report, and checks the library table afterwards. Any other KiCad error dialog stops the run, and its full text goes into the log.
 - This is a legacy SWIG Action Plugin. KiCad plans to replace that API, so a port to the IPC API will be needed for KiCad 11.
 
 ## License

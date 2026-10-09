@@ -21,7 +21,7 @@ import wx
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-VERSION = '0.9.8'
+VERSION = '0.9.9'
 
 _ACTIVE = []          # keep running jobs referenced after the PCB frame closes
 
@@ -518,6 +518,9 @@ class ImportJob:
         self.stage(self.fix_base, f'{self.fix_step} - Repair and quality control')
         import json as _json
         meta = dict(getattr(self, 'import_meta', {}) or {})
+        drv = getattr(self, 'driver', None)
+        if drv is not None and drv.messages:                 # KiCad message boxes of the import
+            meta['kicad_messages'] = [{'title': t, 'text': x, 'action': a} for t, x, a in drv.messages]
         if getattr(self, 't_start', None):
             meta['import_total_s'] = round(time.time() - self.t_start, 1)
         cmd = [_python(), '-u', os.path.join(HERE, 'eagle2kicad_fix.py'), self.target] + args

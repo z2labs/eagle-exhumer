@@ -19,7 +19,7 @@ from ctypes import wintypes
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from win_dialogs import DialogDriver, _dialogs, _title  # noqa: E402
+from win_dialogs import DialogDriver, _dialogs, _title, dialog_text as _dialog_text_full  # noqa: E402
 
 U = ctypes.windll.user32
 WM_COMMAND, WM_CLOSE, MF_BYPOSITION = 0x0111, 0x0010, 0x400
@@ -92,16 +92,21 @@ def title(h):
 
 
 def dialog_text(h):
-    out = []
-    def cb(c, _):
-        b = ctypes.create_unicode_buffer(512); U.GetClassNameW(c, b, 64)
-        if b.value in ('Static', 'Edit'):
-            t = _title(c)
-            if t.strip():
-                out.append(t.strip())
-        return True
-    U.EnumChildWindows(h, EnumProc(cb), 0)
-    return ' | '.join(out)[:400]
+    """Full message text (Static children, TaskDialog via MSAA, else Ctrl+C) - so a FAIL always
+    says WHAT KiCad complained about, not just the dialog title."""
+    return (_dialog_text_full(h) or '(text not readable)')[:600]
+
+
+def check_lib_table(target, name):
+    """After the save: the project sym-lib-table must exist and point at the imported library
+    (KiCad 10 may show a transient 'cannot open sym-lib-table' during the import)."""
+    tbl = os.path.join(target, 'sym-lib-table')
+    lib = os.path.join(target, name + '-eagle-import.kicad_sym')
+    if not os.path.isfile(tbl):
+        raise RuntimeError('sym-lib-table missing after the import')
+    txt = open(tbl, encoding='utf-8', errors='replace').read()
+    if name + '-eagle-import' not in txt or not os.path.isfile(lib) or os.path.getsize(lib) < 100:
+        raise RuntimeError('sym-lib-table / imported symbol library incomplete after the import')
 
 
 # ------------------------------------------------------------------ one design
@@ -170,7 +175,7 @@ def convert(src, target, timeout, brd=None, method='cli'):
             for dlg in _dialogs(p.pid):              # a message box nobody answers = error
                 first.setdefault(dlg, time.time())
                 if time.time() - first[dlg] > 90:
-                    raise RuntimeError(f'KiCad dialog left open: "{title(dlg)}" ' + dialog_text(dlg))
+                    raise RuntimeError(f'KiCad dialog left open: "{title(dlg)}": ' + dialog_text(dlg))
             ws = windows(p.pid)
             eds = [h for h in ws if h != mgr and name in title(h) and accel_id(h, 'Ctrl+S')]
             busy = _dialogs(p.pid) or not all(U.IsWindowEnabled(h) for h in ws)
@@ -216,7 +221,14 @@ def convert(src, target, timeout, brd=None, method='cli'):
                                   '' if os.path.isfile(req[:-5] + '.done') else ' (plugin hook did not run - is the plugin installed?)'))
         time.sleep(2)
         meta['gui_import_s'] = round(time.time() - t_gui, 1)
+        check_lib_table(target, name)
     finally:
+        if 'drv' in locals():
+            drv.stop_flag = True
+        if 'drv' in locals() and drv.messages:
+            meta['kicad_messages'] = [{'title': t, 'text': x, 'action': a_} for t, x, a_ in drv.messages]
+            meta['kicad_known_issues'] = sorted({a_[len('confirmed ('):-1] for _, _, a_ in drv.messages
+                                                 if a_.startswith('confirmed (')})
         for f in (req, req[:-5] + '.done', req[:-5] + '.done.err'):
             if os.path.isfile(f):
                 os.remove(f)
@@ -336,6 +348,8 @@ def main():
                 m = re.search(r'\*\*FAIL\*\* - \d+ finding\(s\):\n((?:  .*\n)+)', out)
                 why = '; '.join(l.strip() for l in (m.group(1).splitlines() if m else [])
                                 if not l.strip().startswith(('3D render', 'eaglefix_metrics')))[:300]
+            if meta.get('kicad_known_issues'):
+                why = (why + '; ' if why else '') + 'KiCad: ' + ', '.join(meta['kicad_known_issues'])
             res['time'] = (f"{meta.get('convert_total_s', 0):.0f}", f"{time.time() - t_f:.0f}")
             rows.append((label, st, why, res))
         except Exception as e:

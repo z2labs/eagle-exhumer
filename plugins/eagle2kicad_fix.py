@@ -2695,6 +2695,8 @@ def main():
     R.h('Project')
     R.p(f'project `{proj}`, sch `{os.path.basename(root_sch)}`, pcb: {has_pcb}')
     R.p(f'Eagle sch: {esch}  |  Eagle brd: {ebrd}  |  kicad-cli: {cli}')
+    for m in IMPORT_META.get('kicad_messages') or []:     # message boxes KiCad showed during the import
+        R.p(f"KiCad import message ({m.get('action')}): \"{m.get('title')}\" {m.get('text') or '(text not readable)'}")
     tmpdir = d
     global VIEW
     VIEW = CliView(d, proj)
