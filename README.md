@@ -28,6 +28,7 @@ Eagle Exhumer runs KiCad's own importer, repairs the importer defects listed bel
 | 12 | Multi-sheet projects: kicad-cli checks only the first sheet | checks see ~nothing | temporary hierarchical view |
 | 13 | Board outline drawn inside a package → board-only footprint | zone fill almost empty (1 080 of 16 483 mm²) | outline moved to board level |
 | 14 | KiCad Python `GetLength()` asserts on circles | script abort | own perimeter math |
+| 15 | Copper layer count taken from the Eagle design-rule `layerSetup`, not from the board (a 2-layer Olimex board with a 4-layer rule set imports as 4 layers) | the fab quotes 4 layers for a 2-layer board | empty inner layers removed when the Eagle board uses none; the quality control fails any layer-count mismatch or empty copper layer |
 
 ## Install
 

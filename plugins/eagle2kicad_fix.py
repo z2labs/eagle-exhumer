@@ -1602,20 +1602,132 @@ def verify_geometry(pcb_path, ebrd):
     if unrouted_bad:
         issues.append(f'unrouted connections after zone fill: KiCad {k_unc}, Eagle airwires {e_air}'
                       + (f', tracks crossing a net tie {tie_x}' if tie_x else ''))
+    # 5. copper layer count: the KiCad stack must be what the Eagle board USES (not what its
+    #    design-rule layerSetup declares); every enabled copper layer must carry copper
+    e_cu = 2 + len(eagle_inner_layers(brd))
+    k_cu = board.GetCopperLayerCount()
+    layers_bad = 0
+    try:
+        cnt = _kicad_layer_items(pcbnew, board)
+        empty_cu = [board.GetLayerName(l) for l in board.GetEnabledLayers().CuStack()
+                    if l not in (pcbnew.F_Cu, pcbnew.B_Cu) and not cnt.get(l)]
+    except Exception as ex:
+        empty_cu = []; issues.append(f'layer check failed: {ex}')
+    if k_cu != e_cu:
+        layers_bad += 1
+        issues.append(f'copper layer count: Eagle board uses {e_cu}, KiCad project has {k_cu} (fab would quote {k_cu} layers)')
+    if empty_cu:
+        layers_bad += 1
+        issues.append('copper layer(s) with no copper on them: ' + ', '.join(empty_cu))
     tot_v = sum(sum(c.values()) for c in e_via.values()), sum(sum(c.values()) for c in k_via.values())
     R.p(f'**Eagle board vs KiCad geometry**: {len(els)} parts ({n_pos} moved, {n_side} wrong side, '
         f'{n_rot} rotated, {n_val} values differ, {len(extra)} extra on KiCad side), copper length differs on {n_len} nets, '
         f'via count/drill differs on {n_via} nets (vias {tot_v[0]} vs {tot_v[1]}), '
         f'{n_poly} nets lost their polygon, outline {e_out:.1f} vs {k_out:.1f} mm, '
         f'unrouted after zone fill {k_unc} (Eagle airwires {e_air}, through net ties {tie_x}), '
-        f'{n_mill} Edge.Cuts shapes from Eagle milling')
+        f'{n_mill} Edge.Cuts shapes from Eagle milling, copper layers {e_cu} vs {k_cu}')
     for s_ in issues[:60]:
         R.p('  ' + s_)
     GEOM_LOG.append(dict(moved=n_pos, side=n_side, rot=n_rot, val=n_val, padpos=n_padpos, padmiss=n_padmiss,
                          padsize=n_padsize, drill=n_paddrill, length=n_len, via=n_via, poly=n_poly,
-                         missing_parts=n_missp, extra=len(extra), outline=int(outline_bad), outline_invalid=outline_invalid, unrouted=unrouted_bad))
+                         missing_parts=n_missp, extra=len(extra), outline=int(outline_bad), outline_invalid=outline_invalid, unrouted=unrouted_bad,
+                         layers=layers_bad))
     if extra:
         R.p('  extra KiCad footprints: ' + ', '.join(extra[:20]))
+
+
+CU_LAYERS = {str(i) for i in range(1, 17)}
+
+
+def eagle_copper_layers(brd):
+    """Copper layers the Eagle board actually USES (items drawn on them, via extents), as a set of
+    Eagle layer numbers 1..16. Top and bottom always count. The design-rule 'layerSetup' string is
+    deliberately NOT trusted: Olimex's 2-layer iMX233-Micro carries a 4-layer setup (1+2*15+16)
+    with nothing on 2/15, and KiCad's importer turns that into a 4-layer board."""
+    used = {'1', '16'}
+    placed = {(e.get('library'), e.get('package')) for e in brd.findall('elements/element')}
+    scopes = [brd.find('plain'), brd.find('signals')] + \
+             [p for lib in brd.findall('libraries/library') for p in lib.findall('packages/package')
+              if (lib.get('name'), p.get('name')) in placed]
+    for sc in scopes:
+        if sc is None:
+            continue
+        for el in sc.iter():
+            if el.tag in ('wire', 'polygon', 'rectangle', 'circle', 'smd', 'text') and el.get('layer') in CU_LAYERS:
+                used.add(el.get('layer'))
+            elif el.tag == 'via' and el.get('extent'):
+                a, b = el.get('extent').split('-')
+                used.update((a, b))
+    return used
+
+
+def eagle_inner_layers(brd):
+    return {int(l) for l in eagle_copper_layers(brd)} - {1, 16}
+
+
+def _kicad_layer_items(pcbnew, board):
+    """Count of items per copper layer id on the KiCad board (tracks, vias by type, zones, footprint
+    pads/graphics). Through-hole pads and through vias are not counted: they say nothing about
+    whether an inner layer is needed."""
+    cnt = Counter()
+    for t in board.GetTracks():
+        if t.GetClass() == 'PCB_VIA':
+            if t.GetViaType() != pcbnew.VIATYPE_THROUGH:
+                cnt[t.TopLayer()] += 1; cnt[t.BottomLayer()] += 1
+        else:
+            cnt[t.GetLayer()] += 1
+    for z in board.Zones():
+        for l in z.GetLayerSet().CuStack():
+            cnt[l] += 1
+    for fp in board.GetFootprints():
+        for g in fp.GraphicalItems():
+            if board.IsLayerEnabled(g.GetLayer()) and pcbnew.IsCopperLayer(g.GetLayer()):
+                cnt[g.GetLayer()] += 1
+        for p in fp.Pads():
+            if p.GetAttribute() == pcbnew.PAD_ATTRIB_SMD:
+                cnt[p.GetLayer()] += 1
+    for d_ in board.GetDrawings():
+        if pcbnew.IsCopperLayer(d_.GetLayer()):
+            cnt[d_.GetLayer()] += 1
+    return cnt
+
+
+def trim_empty_inner_layers(pcb_path, ebrd, dry):
+    """KiCad's Eagle importer sizes the copper stack from the Eagle design-rule 'layerSetup', which
+    may declare more layers than the board uses. The result is a 4-layer KiCad project of a 2-layer
+    board: the fab quotes 4 layers. When the Eagle source uses no inner layer and the KiCad inner
+    layers are empty, the stack is reduced to 2 layers. Partial cases (some inner layers used) are
+    left alone and reported by the quality control."""
+    R.h('PCB: copper layer count vs the Eagle source')
+    try:
+        import pcbnew
+    except ImportError:
+        R.p('pcbnew module not available - skipped'); return
+    brd = eagle_root(ebrd).find('drawing/board')
+    e_inner = eagle_inner_layers(brd)
+    board = pcbnew.LoadBoard(pcb_path)
+    n = board.GetCopperLayerCount()
+    setup = brd.find('designrules/param[@name="layerSetup"]')
+    R.p(f'Eagle: layerSetup {setup.get("value") if setup is not None else "?"}, copper layers in use {2 + len(e_inner)}; KiCad: {n} copper layers')
+    if n <= 2 or e_inner:
+        return
+    cnt = _kicad_layer_items(pcbnew, board)
+    inner = [l for l in board.GetEnabledLayers().CuStack() if l not in (pcbnew.F_Cu, pcbnew.B_Cu)]
+    busy = [board.GetLayerName(l) for l in inner if cnt.get(l)]
+    if busy:
+        R.p(f'inner layers carry items on the KiCad side ({", ".join(busy)}) although the Eagle source uses none - left for the quality control')
+        return
+    R.p(f'{n - 2} empty inner layer(s) removed -> 2-layer board (as in the Eagle source)')
+    if not dry:
+        board.SetCopperLayerCount(2)
+        pcbnew.SaveBoard(pcb_path, board)
+        # KiCad keeps a stale (stackup ...) block if one exists: it would still list 4 copper layers
+        tree = read_sx(pcb_path)
+        setup_ = kid(tree, 'setup')
+        if setup_ is not None:
+            st = kid(setup_, 'stackup')
+            if st is not None:
+                setup_.remove(st); write_sx(pcb_path, tree)
 
 
 def promote_fp_edge_cuts(pcb_path, dry):
@@ -2617,6 +2729,7 @@ def main():
         fix_pcb_sexpr(pcb, comps, a.dry_run, ebrd)
         promote_fp_edge_cuts(pcb, a.dry_run)          # first: milling is classified against the outline
         if ebrd:
+            trim_empty_inner_layers(pcb, ebrd, a.dry_run)
             add_milling(pcb, ebrd, a.dry_run)
         assign_orphan_pads(pcb, a.dry_run)
         nicks = Counter()
