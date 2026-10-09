@@ -188,6 +188,9 @@
 <circle cx="1150" cy="95" r="90" fill="url(#moonglow)"/>
 <circle cx="1150" cy="95" r="44" fill="#fff4c4"/>
 <circle cx="1170" cy="83" r="40" fill="#1d2049" opacity="0.92"/>
+<g transform="translate(1128 104) rotate(-8) scale(0.85)"><path d="M0,2 C-8,-8 -20,-14 -32,-8 C-27,-4 -26,1 -28,5 C-22,1 -17,3 -15,7 C-11,3 -5,3 0,8 C5,3 11,3 15,7 C17,3 22,1 28,5 C26,1 27,-4 32,-8 C20,-14 8,-8 0,2 Z" fill="#100f22"/><ellipse cx="0" cy="1" rx="5" ry="7" fill="#100f22"/><path d="M-4,-4 L-5,-11 L-1,-6 Z M4,-4 L5,-11 L1,-6 Z" fill="#100f22"/><circle cx="-2" cy="-1" r="1.1" fill="#ffd34d"/><circle cx="2" cy="-1" r="1.1" fill="#ffd34d"/></g>
+<g transform="translate(205 205) rotate(10) scale(1.15)"><path d="M0,2 C-8,-8 -20,-14 -32,-8 C-27,-4 -26,1 -28,5 C-22,1 -17,3 -15,7 C-11,3 -5,3 0,8 C5,3 11,3 15,7 C17,3 22,1 28,5 C26,1 27,-4 32,-8 C20,-14 8,-8 0,2 Z" fill="#100f22"/><ellipse cx="0" cy="1" rx="5" ry="7" fill="#100f22"/><path d="M-4,-4 L-5,-11 L-1,-6 Z M4,-4 L5,-11 L1,-6 Z" fill="#100f22"/><circle cx="-2" cy="-1" r="1.1" fill="#ffd34d"/><circle cx="2" cy="-1" r="1.1" fill="#ffd34d"/></g>
+<g transform="translate(300 168) rotate(-14) scale(0.75)"><path d="M0,2 C-8,-8 -20,-14 -32,-8 C-27,-4 -26,1 -28,5 C-22,1 -17,3 -15,7 C-11,3 -5,3 0,8 C5,3 11,3 15,7 C17,3 22,1 28,5 C26,1 27,-4 32,-8 C20,-14 8,-8 0,2 Z" fill="#100f22"/><ellipse cx="0" cy="1" rx="5" ry="7" fill="#100f22"/><path d="M-4,-4 L-5,-11 L-1,-6 Z M4,-4 L5,-11 L1,-6 Z" fill="#100f22"/><circle cx="-2" cy="-1" r="1.1" fill="#ffd34d"/><circle cx="2" cy="-1" r="1.1" fill="#ffd34d"/></g>
 <g font-family="Inter, DejaVu Sans, sans-serif" text-anchor="middle">
   <text x="640" y="100" font-size="66" font-weight="800" fill="#fff" letter-spacing="1" filter="url(#glow)">Eagle Exhumer</text>
   <text x="640" y="142" font-size="23" font-weight="500" fill="#e7dcff">old EAGLE designs, gently brought back to life in KiCad 10</text>
@@ -393,6 +396,32 @@
   <path d="M905,382 C920,330 940,282 950,250 C956,232 972,214 998,206 C984,222 976,238 974,256 C972,300 990,340 1004,382 Z" fill="url(#hat)" stroke="#3d1f94" stroke-width="3" stroke-linejoin="round"/>
   <path d="M908,370 C936,378 976,378 1002,370 L998,358 C972,366 938,366 912,358 Z" fill="#ffd34d"/><polygon points="944.0,312.0 946.0,317.2 951.6,317.5 947.2,321.1 948.7,326.5 944.0,323.4 939.3,326.5 940.8,321.1 936.4,317.5 942.0,317.2" fill="#ffe680" opacity="1" /><polygon points="972.0,284.0 973.5,287.9 977.7,288.1 974.5,290.8 975.5,294.9 972.0,292.6 968.5,294.9 969.5,290.8 966.3,288.1 970.5,287.9" fill="#ffe680" opacity="1" /><polygon points="986.0,335.0 987.3,338.2 990.8,338.5 988.1,340.7 988.9,344.0 986.0,342.2 983.1,344.0 983.9,340.7 981.2,338.5 984.7,338.2" fill="#ffe680" opacity="1" />
   <circle cx="998" cy="206" r="7" fill="#ffe14d" filter="url(#glow)"/>
+</g>
+<g id="cat">
+  <ellipse cx="1205" cy="618" rx="52" ry="8" fill="#0d1a12" opacity="0.5"/>
+  <!-- tail -->
+  <path d="M1238,604 C1272,596 1272,548 1250,532" stroke="#141418" stroke-width="13" fill="none" stroke-linecap="round"/>
+  <path d="M1238,604 C1272,596 1272,548 1250,532" stroke="#f2f2f2" stroke-width="13" fill="none" stroke-linecap="butt" stroke-dasharray="6 12" stroke-dashoffset="4"/>
+  <!-- body -->
+  <ellipse cx="1206" cy="570" rx="42" ry="46" fill="#141418"/>
+  <path d="M1176,548 q10,6 18,0 M1170,566 q12,7 22,0 M1174,586 q11,6 20,0 M1222,544 q8,6 16,2 M1226,564 q9,6 18,2 M1224,584 q9,6 16,2" stroke="#f2f2f2" stroke-width="4" fill="none" stroke-linecap="round"/>
+  <ellipse cx="1197" cy="575" rx="13" ry="22" fill="#f2f2f2" opacity="0.92"/>
+  <!-- paws -->
+  <ellipse cx="1188" cy="611" rx="11" ry="7" fill="#141418"/><ellipse cx="1212" cy="611" rx="11" ry="7" fill="#141418"/>
+  <path d="M1183,612 v4 M1188,612 v4 M1193,612 v4 M1207,612 v4 M1212,612 v4 M1217,612 v4" stroke="#f2f2f2" stroke-width="2"/>
+  <!-- head, turned toward the fairy and the robot -->
+  <path d="M1158,500 L1160,466 L1178,484 Z" fill="#141418"/><path d="M1162,494 L1163,474 L1173,485 Z" fill="#ff9ab8"/>
+  <path d="M1192,482 L1208,462 L1212,496 Z" fill="#141418"/><path d="M1198,485 L1207,470 L1208,490 Z" fill="#ff9ab8"/>
+  <circle cx="1184" cy="508" r="30" fill="#141418"/>
+  <path d="M1170,484 l3,10 M1184,481 v11 M1198,484 l-3,10" stroke="#f2f2f2" stroke-width="3.5" stroke-linecap="round"/>
+  <!-- eyes looking left -->
+  <ellipse cx="1172" cy="506" rx="7" ry="8.5" fill="#c8f25a"/><ellipse cx="1194" cy="506" rx="7" ry="8.5" fill="#c8f25a"/>
+  <ellipse cx="1169" cy="507" rx="2.6" ry="6.5" fill="#0b0b0e"/><ellipse cx="1191" cy="507" rx="2.6" ry="6.5" fill="#0b0b0e"/>
+  <circle cx="1171" cy="503" r="1.6" fill="#fff"/><circle cx="1193" cy="503" r="1.6" fill="#fff"/>
+  <!-- nose, mouth, whiskers -->
+  <path d="M1179,517 h7 l-3.5,4 z" fill="#ff9ab8"/>
+  <path d="M1182.5,521 q-4,5 -8,1 M1182.5,521 q4,5 8,1" stroke="#f2f2f2" stroke-width="1.6" fill="none"/>
+  <path d="M1170,519 l-24,-4 M1170,523 l-24,3 M1196,519 l22,-4 M1196,523 l22,3" stroke="#f2f2f2" stroke-width="1.4" opacity="0.85"/>
 </g>
 <path d="M808,394 Q760,300 690,352" stroke="#fff3a6" stroke-width="3" fill="none" stroke-dasharray="2 9" stroke-linecap="round" opacity="0.9"/>
 <polygon points="793.5,364.8 795.0,367.7 798.3,368.2 796.0,370.6 796.5,373.8 793.5,372.4 790.6,373.8 791.0,370.6 788.8,368.2 792.0,367.7" fill="#fff3a6" opacity="0.95" />

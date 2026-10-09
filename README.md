@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/banner.png" width="100%" alt="A friendly fairy with a pointy hat and a magic wand wakes a little EAGLE robot in its freshly dug grave; one eye opens, it is booting. Shovel and dirt pile on the left, a tombstone reading R.I.P. EAGLE 1988-2026 behind."></p>
+<p align="center"><img src="docs/banner.png" width="100%" alt="A friendly fairy with a pointy hat and a magic wand wakes a little EAGLE robot in its freshly dug grave; one eye opens, it is booting. Shovel and dirt pile on the left, a tombstone reading R.I.P. EAGLE 1988-2026 behind, a black cat with white stripes watching from the right, three bats in the moonlit sky."></p>
 
 # Eagle Exhumer
 
