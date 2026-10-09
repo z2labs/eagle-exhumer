@@ -48,7 +48,13 @@ Open the **PCB Editor from the KiCad project manager**, not as a standalone app,
   2. saves the project to `<design>_kicad/`;
   3. fixes it and runs the check;
   4. reopens the editors.
-- **Fix + check (all platforms).** First import yourself with *File → Import Non-KiCad Project → EAGLE* and save. Then click the button and pick the Eagle file the project came from. The editors close, the project is fixed in place (a backup goes to `_eaglefix_backup/`), and the editors reopen. Running it again on a fixed project only re-checks it.
+- **Fix + check (all platforms).** Step by step:
+  1. In the KiCad project manager: *File → Import Non-KiCad Project → EAGLE*, pick the `.sch`/`.brd`, choose an **empty** destination folder, accept the layer mapping.
+  2. **Save** the project (*File → Save* in the project manager) - KiCad's import leaves it unsaved, and the plugin works on the saved files.
+  3. Open the **PCB Editor from the project manager** (a PCB Editor started without a project cannot be used - KiCad says "Create (or open) a project to edit a pcb").
+  4. Click the tombstone → *Fix + check the OPEN project* → pick the Eagle file the project came from. If no saved project is loaded, the plugin asks for the `.kicad_pro` instead.
+
+  The editors close, the project is fixed in place (a backup goes to `_eaglefix_backup/`), and the editors reopen. Running it again on a fixed project only re-checks it.
 
 Results land in the project folder:
 

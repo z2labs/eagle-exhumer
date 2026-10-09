@@ -610,14 +610,17 @@ class ImportJob:
         wx.CallLater(500, self._save_log)
         warn = self._warnings()
         rep = os.path.join(self.target, 'eaglefix_report.md')
+        other = getattr(self, 'other_project', False)
+        if other:
+            warn += '\n\nThis project is not the one loaded in KiCad: open it with File > Open Project to see the result.'
         if rc == 0:
             self.win.finish(True, 'Done - QC PASS',
                             'The KiCad project matches the Eagle source. Open the schematic or the PCB below; '
-                            'in the PCB editor press B to refill the zones.' + warn)
+                            'in the PCB editor press B to refill the zones.' + warn, can_open=not other)
         elif rc == 1:
             self.win.finish(False, 'Done - QC FAIL: please check before you use it',
                             'The project was converted and fixed, but the quality control found differences '
-                            'from the Eagle source. They are listed under "QC VERDICT" in the report.' + warn)
+                            'from the Eagle source. They are listed under "QC VERDICT" in the report.' + warn, can_open=not other)
         elif rc == 3:
             self.win.finish(False, 'Done - QC self-check failed',
                             'The quality control could not prove itself on this design, so the result is not '
@@ -708,9 +711,24 @@ class Eagle2KiCadImport(pcbnew.ActionPlugin):
             fix_mode = True
         if fix_mode:
             pro = _project()
+            other_project = False
             if not pro or not os.path.isfile(pro):
-                wx.MessageBox('No saved KiCad project is open.', 'Eagle Exhumer', wx.ICON_WARNING)
-                return
+                # KiCad's own Eagle import leaves the project unsaved (no .kicad_pro yet), and the PCB
+                # editor may have been opened without a project: let the user point at the project
+                if wx.MessageBox('No saved KiCad project is loaded in this KiCad session.\n\n'
+                                 'Fix + check works on the folder of an already imported and SAVED project. '
+                                 'If you just imported with File > Import Non-KiCad Project > EAGLE, save the '
+                                 'project first (File > Save in the project manager).\n\n'
+                                 'Pick the project file (.kicad_pro) now?', 'Eagle Exhumer',
+                                 wx.YES_NO | wx.ICON_QUESTION) != wx.YES:
+                    return
+                dlg = wx.FileDialog(None, 'KiCad project to fix and check (.kicad_pro)',
+                                    wildcard='KiCad project (*.kicad_pro)|*.kicad_pro',
+                                    style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST)
+                if dlg.ShowModal() != wx.ID_OK:
+                    return
+                pro = dlg.GetPath(); dlg.Destroy()
+                other_project = True
             dlg = wx.FileDialog(None, 'The Eagle schematic or board this project was imported from',
                                 defaultDir=os.path.dirname(os.path.dirname(pro)),
                                 wildcard='Eagle (*.sch;*.brd)|*.sch;*.brd;*.SCH;*.BRD',
@@ -725,6 +743,7 @@ class Eagle2KiCadImport(pcbnew.ActionPlugin):
                              'Eagle Exhumer', wx.YES_NO | wx.ICON_QUESTION) != wx.YES:
                 return
             job = FixJob(mgr, src, pro)
+            job.other_project = other_project
             wx.CallAfter(job.start)
             return
         dlg = wx.FileDialog(None, 'Eagle schematic / board (.sch, .brd)',
