@@ -66,6 +66,11 @@ def _text(dlg):
     return ' '.join(t for t in (_title(c).strip() for c in _children(dlg) if _cls(c) == 'Static') if t)
 
 
+def is_progress(dlg):
+    """KiCad's own progress window ('Importing schematic ... Elapsed time') - not a message."""
+    return any(_cls(c) == 'msctls_progress32' for c in _children(dlg))
+
+
 def is_task_dialog(dlg):
     """wxMessageDialog on Windows Vista+ is a TaskDialog: its text and buttons live inside a
     DirectUIHWND, not in Static / Button child windows."""
@@ -102,6 +107,7 @@ def _msaa_text(dlg):
         P_STR = WINFUNCTYPE(HRESULT, c_void_p, VARIANT, POINTER(c_void_p))       # get_accName(varChild, BSTR*)
         P_ROLE = WINFUNCTYPE(HRESULT, c_void_p, VARIANT, POINTER(VARIANT))       # get_accRole(varChild, VARIANT*)
         ROLE_BUTTON, VT_I4, VT_DISPATCH = 0x2B, 3, 9
+        TEXT_ROLES = (0x29, 0x2A)                      # ROLE_SYSTEM_STATICTEXT, ROLE_SYSTEM_TEXT
         out, seen = [], [0]
 
         def bstr(acc, child):
@@ -139,26 +145,30 @@ def _msaa_text(dlg):
                     sub = c_void_p()
                     if vcall(v.val, 0, P_QI, byref(IID_IAcc), byref(sub)) == 0 and sub.value:
                         self_ = VARIANT(); self_.vt = VT_I4                      # CHILDID_SELF
-                        if role(sub.value, self_) != ROLE_BUTTON:
+                        rl = role(sub.value, self_)
+                        if rl != ROLE_BUTTON:
                             t = bstr(sub.value, self_).strip()
                             if t:
-                                out.append(t)
+                                out.append((rl, t))
                         walk(sub.value, depth + 1)
                         vcall(sub.value, 2, P_REL)
                     vcall(v.val, 2, P_REL)
                 elif v.vt == VT_I4:
-                    if role(acc, v) != ROLE_BUTTON:
+                    rl = role(acc, v)
+                    if rl != ROLE_BUTTON:
                         t = bstr(acc, v).strip()
                         if t:
-                            out.append(t)
+                            out.append((rl, t))
 
         for host in [c for c in _children(dlg) if _cls(c) == 'DirectUIHWND'] or [dlg]:
             acc = c_void_p()
             if oleacc.AccessibleObjectFromWindow(host, 0xFFFFFFFC, byref(IID_IAcc), byref(acc)) == 0 and acc.value:
                 walk(acc.value, 0)
                 vcall(acc.value, 2, P_REL)
+        texts = [t for rl, t in out if rl in TEXT_ROLES] or \
+                [t for rl, t in out if not t.endswith('Icon')]   # no text roles: all but icons
         res = []
-        for t in out:                                # keep order, drop duplicates
+        for t in texts:                              # keep order, drop duplicates
             if t not in res:
                 res.append(t)
         return ' | '.join(res)
@@ -341,7 +351,7 @@ class DialogDriver(threading.Thread):
                 auto = [c for c in _children(d) if _cls(c) == 'Button' and 'auto' in _title(c).lower()]
                 ok = next((c for c in _children(d) if _cls(c) == 'Button' and U.GetDlgCtrlID(c) == 5100), None)  # wxID_OK
                 if not auto or not ok:
-                    if is_task_dialog(d) or not _name_edit(d):
+                    if not is_progress(d) and (is_task_dialog(d) or not _name_edit(d)):
                         self.handle_message(d)       # e.g. KiCad's sym-lib-table error before the mapping
                     continue
                 self.seen.add(d)
@@ -362,7 +372,7 @@ class DialogDriver(threading.Thread):
         t0 = time.time()
         while not self.stop_flag and time.time() - t0 < timeout:
             for d in _dialogs(self.pid):
-                if d in self.seen or not U.IsWindowEnabled(d) or _name_edit(d):
+                if d in self.seen or not U.IsWindowEnabled(d) or _name_edit(d) or is_progress(d):
                     continue
                 self.handle_message(d)
             self._minimize_new()

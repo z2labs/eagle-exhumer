@@ -19,7 +19,7 @@ from ctypes import wintypes
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from win_dialogs import DialogDriver, _dialogs, _title, dialog_text as _dialog_text_full  # noqa: E402
+from win_dialogs import DialogDriver, _dialogs, _title, is_progress, dialog_text as _dialog_text_full  # noqa: E402
 
 U = ctypes.windll.user32
 WM_COMMAND, WM_CLOSE, MF_BYPOSITION = 0x0111, 0x0010, 0x400
@@ -173,6 +173,8 @@ def convert(src, target, timeout, brd=None, method='cli'):
         t0 = time.time(); stable = 0; eds = []; first = {}
         while time.time() - t0 < timeout:
             for dlg in _dialogs(p.pid):              # a message box nobody answers = error
+                if is_progress(dlg):
+                    continue                         # KiCad's progress window of a long import
                 first.setdefault(dlg, time.time())
                 if time.time() - first[dlg] > 90:
                     raise RuntimeError(f'KiCad dialog left open: "{title(dlg)}": ' + dialog_text(dlg))

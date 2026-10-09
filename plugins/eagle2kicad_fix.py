@@ -214,6 +214,18 @@ def eagle_brd_rules(path):
                                         clearance={x.get('class'): _unit(x.get('value')) for x in c.findall('clearance')})
     return rules, classes
 
+def eagle_brd_net_classes(path):
+    """Eagle board signal name -> net class number (only signals not in class 0)."""
+    root = eagle_root(path) if path else None
+    out = {}
+    if root is None:
+        return out
+    for sig in root.iter('signal'):
+        c = sig.get('class', '0')
+        if c != '0' and sig.get('name'):
+            out[sig.get('name')] = c
+    return out
+
 # --------------------------------------------------------------------------- KiCad helpers
 
 def find_kicad_cli(arg):
@@ -524,9 +536,40 @@ def inst_xform(inst, lx, ly):
 
 # --------------------------------------------------------------------------- schematic fixes
 
-def fix_power_values(sheets):
-    R.h('SCH: power symbol Value vs. pin name')
+def eagle_supply_nets(path):
+    """Eagle supply-symbol part -> the name of the Eagle net its supply pin sits on.
+    Eagle lets a net named VDD_3V3_1_TUNER carry a VDD_3V3 supply symbol (the explicit net name
+    wins); in KiCad a power symbol IS a global net named by its Value, so all such branches merge."""
+    out = {}
+    root = eagle_root(path) if path else None
+    if root is None:
+        return out
+    sch = root.find('drawing/schematic')
+    libs = {l.get('name'): l for l in sch.findall('libraries/library')}
+    parts = {p.get('name'): p for p in sch.findall('parts/part')}
+    sup = {}
+    def is_sup(part, gate, pin):
+        k = (part, gate, pin)
+        if k not in sup:
+            sup[k] = False
+            p = parts.get(part); lib = libs.get(p.get('library')) if p is not None else None
+            ds = lib.find(f"devicesets/deviceset[@name='{p.get('deviceset')}']") if lib is not None else None
+            g = ds.find(f"gates/gate[@name='{gate}']") if ds is not None else None
+            sym = lib.find(f"symbols/symbol[@name='{g.get('symbol')}']") if g is not None else None
+            pe = sym.find(f"pin[@name='{pin}']") if sym is not None else None
+            sup[k] = pe is not None and pe.get('direction') == 'sup'
+        return sup[k]
+    for net in sch.iter('net'):
+        for pr in net.iter('pinref'):
+            if is_sup(pr.get('part'), pr.get('gate'), pr.get('pin')):
+                out[pr.get('part')] = net.get('name')
+    return out
+
+
+def fix_power_values(sheets, esch=None):
+    R.h('SCH: power symbol Value vs. pin name / Eagle net name')
     n = 0
+    eagle_net = eagle_supply_nets(esch)
     for sh in sheets:
         for inst in sh.instances():
             lid = str(kid(inst, 'lib_id')[1])
@@ -537,10 +580,15 @@ def fix_power_values(sheets):
             if len(pins) != 1 or not pins[0]['name']:
                 continue
             pname = pins[0]['name']
+            ref0 = prop_val(inst, 'Reference', '')
+            en = eagle_net.get(ref0.lstrip('#')) or eagle_net.get(ref0)
+            if en and en != pname:
+                pname = en                       # Eagle net renamed over the supply symbol
             vp = prop(inst, 'Value')
             if vp is not None and str(vp[2]) != pname:
                 ref = prop_val(inst, 'Reference', '?')
-                R.p(f'{os.path.basename(sh.path)} {ref}: Value `{vp[2]}` -> `{pname}` (Eagle net = pin name)')
+                R.p(f'{os.path.basename(sh.path)} {ref}: Value `{vp[2]}` -> `{pname}`'
+                    + (' (Eagle net name over the supply symbol)' if pname == en else ' (Eagle net = pin name)'))
                 vp[2] = Q(pname); sh.dirty = True; n += 1
     R.p(f'{n} power symbols corrected')
 
@@ -786,7 +834,7 @@ def add_pwr_flags(cli, root_sch, sheets, tmpdir):
                     continue
                 ls = sh.libsyms.get(str(kid(inst, 'lib_id')[1]))
                 if 'pos' in it:
-                    pin_hit = (sh, inst, erc_xy(it['pos']))
+                    pin_hit = (sh, inst, erc_xy(it['pos'], sh))
                 if ls is not None and is_power(ls):
                     net = prop_val(inst, 'Value', '')
                 else:
@@ -848,9 +896,42 @@ def add_pwr_flags(cli, root_sch, sheets, tmpdir):
     n_flags = sum(1 for n in done if not re.fullmatch(r'(N\.?C\.?|DNC|N/C)\d*', n, re.I))
     R.p(f'{n_flags} PWR_FLAGs added - review them: a flag means "this net is supplied from off-sheet/connector"')
 
-def erc_xy(pos):
-    """kicad-cli ERC JSON positions are in units of 100 mm; snap to the 0.0254 mm (1 mil) grid."""
-    return tuple(round(round(float(pos[k]) * 100 / 0.0254) * 0.0254, 4) for k in ('x', 'y'))
+_PIN_PTS = {}
+
+
+def sheet_pin_points(sh):
+    """Connection points of every symbol pin on a sheet (both mirror/rotate orders), 0.01 mm grid."""
+    key = id(sh)
+    if key not in _PIN_PTS:
+        pts = set()
+        for inst in sh.instances():
+            ls = sh.libsyms.get(str(kid(inst, 'lib_id')[1]))
+            if ls is None:
+                continue
+            u = kid(inst, 'unit'); unit = int(u[1]) if u else 1
+            for pn in _unit_pins(ls, unit):
+                for f in (inst_xform, _inst_xform2):
+                    x, y = f(inst, pn['x'], pn['y'])
+                    pts.add((round(x, 2), round(y, 2)))
+        _PIN_PTS[key] = pts
+    return _PIN_PTS[key]
+
+
+def erc_xy(pos, sh=None):
+    """kicad-cli ERC JSON position -> schematic mm, snapped to the 0.0254 mm (1 mil) grid.
+    The JSON is normally in units of 100 mm, but KiCad 10 reports some sheets of a multi-root
+    project (seen: the sub-sheets of a 21-sheet Eagle import) in mm. Positions 100x too large put
+    PWR_FLAGs and no-connect flags far outside the page. Pick the scale that lands on a pin of that
+    sheet, else the one that fits on a page (<= 1500 mm)."""
+    def snap(scale):
+        return tuple(round(round(float(pos[k]) * scale / 0.0254) * 0.0254, 4) for k in ('x', 'y'))
+    cands = [snap(100), snap(1)]
+    if sh is not None:
+        pts = sheet_pin_points(sh)
+        for c in cands:
+            if max(abs(v) for v in c) <= 1500 and (round(c[0], 2), round(c[1], 2)) in pts:
+                return c
+    return cands[0] if max(abs(v) for v in cands[0]) <= 1500 else cands[1]
 
 
 def wire_len(w):
@@ -1050,7 +1131,7 @@ def add_no_connects(cli, root_sch, sheets, tmpdir, eagle_truth):
             sh = by_ref.get(ref)
             if not sh:
                 continue
-            x, y = erc_xy(it['pos'])
+            x, y = erc_xy(it['pos'], sh)
             sh.tree.append(['no_connect', ['at', f'{x:g}', f'{y:g}'], ['uuid', new_uuid()]])
             sh.dirty = True; n += 1
     R.p(f'{n} no-connect flags added (pins unconnected in Eagle as well)')
@@ -2279,17 +2360,48 @@ def apply_design_rules(pro_path, brd, dry):
     for kc in cls:
         if kc.get('name') in named:
             num, ec = named[kc['name']]
-            own = [v for k2, v in ec.get('clearance', {}).items() if v]
-            newc = round(max(own) if own else (wc or kc.get('clearance', 0.2)), 4)
+            # Eagle <clearance class="m"> inside class n is the n:m pair value (written to the
+            # .kicad_dru); only n:0 applies against everything = the KiCad class clearance
+            own = ec.get('clearance', {}).get('0')
+            newc = round(own if own else (wc or kc.get('clearance', 0.2)), 4)
             if kc.get('clearance') != newc:
                 R.p(f"net class {kc['name']} clearance: {kc.get('clearance')} -> {newc} mm"
-                    + ('' if own else ' (no own clearance in Eagle -> board default)'))
+                    + ('' if own else ' (no n:0 clearance in Eagle -> board default; pair values in .kicad_dru)'))
                 kc['clearance'] = newc
             if ec.get('width'):
                 kc['track_width'] = round(ec['width'], 4)
     missing = [n for n in named if n not in {c.get('name') for c in cls}]
     if missing:
-        R.p('Eagle net classes not found in KiCad: ' + ', '.join(missing))
+        # kicad-cli's board import does not create the Eagle net classes (and the class:class
+        # clearance rules in the .kicad_dru then match nothing): create them from the Eagle class
+        # (width, drill, own clearance) on top of the Default class, and assign the nets.
+        for n in missing:
+            num, ec = named[n]
+            kc = {k: v for k, v in dflt.items() if k not in ('name', 'priority')}
+            kc['name'] = n
+            kc['priority'] = max([c.get('priority', 0) for c in cls if c.get('name') != 'Default'] + [-1]) + 1
+            own = ec.get('clearance', {}).get('0')
+            kc['clearance'] = round(own if own else (wc or dflt.get('clearance', 0.2)), 4)
+            if ec.get('width'):
+                kc['track_width'] = round(ec['width'], 4)
+            if ec.get('drill'):
+                kc['via_drill'] = round(ec['drill'], 4)
+                kc['via_diameter'] = round(max(kc.get('via_diameter', 0), ec['drill'] + 2 * (g('rlMinViaOuter') or 0.1)), 4)
+            cls.append(kc)
+        R.p('Eagle net classes created in KiCad: ' + ', '.join(
+            f"{n} (width {next(c for c in cls if c['name'] == n).get('track_width')} mm, clearance "
+            f"{next(c for c in cls if c['name'] == n).get('clearance')} mm)" for n in missing))
+    sig_cls = eagle_brd_net_classes(brd)
+    pats = ns.setdefault('netclass_patterns', [])
+    have = {(p_.get('netclass'), p_.get('pattern')) for p_ in pats}
+    num2name = {num: c['name'] for num, c in classes.items() if c.get('name') and c['name'] != 'default'}
+    added = defaultdict(int)
+    for net, num in sorted(sig_cls.items()):
+        cname = num2name.get(num)
+        if cname and (cname, net) not in have:
+            pats.append({'netclass': cname, 'pattern': net}); added[cname] += 1
+    if added:
+        R.p('nets assigned to Eagle net classes: ' + ', '.join(f'{k}: {v}' for k, v in sorted(added.items())))
     if g('mlMinStopFrame'):
         R.p(f'note: Eagle min solder-mask frame {g("mlMinStopFrame")} mm - KiCad pads default to 0 expansion, '
             'set Board Setup > Solder Mask if your fab expects it')
@@ -2785,7 +2897,7 @@ def main():
         R.h('Backup'); R.p(bk)
 
     progress(9, 'Fixing the schematic')
-    fix_power_values(sheets)
+    fix_power_values(sheets, esch)
     if not a.no_label_globalize:
         fix_local_labels(sheets)
     fix_pinless(sheets)
