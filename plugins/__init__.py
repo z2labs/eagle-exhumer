@@ -255,7 +255,25 @@ class LogWindow(wx.Frame):
             return
         self.spin = (self.spin + 1) % len(SPIN)
         self.bar.SetLabel(f'[{"#" * k}{"." * (n - k)}] {self.pct:3d}%   {SPIN[self.spin]} working, '
-                          f'{el // 60:02d}:{el % 60:02d} elapsed - not frozen, some steps take a minute')
+                          f'{el // 60:02d}:{el % 60:02d} elapsed{self._eta(el)} - not frozen, some steps take a minute')
+
+    def _eta(self, el):
+        """Remaining-time estimate. The fixer's percentages are measured time fractions, so
+        total ~ elapsed * 100 / pct. Shown after 20 s; the predicted finish time is smoothed so the
+        number does not jump at every stage change."""
+        try:
+            if el < 20 or self.pct < 5 or self.pct >= 100 or getattr(self, 'waiting', False):
+                return ''
+            finish = self.t0 + el * 100.0 / self.pct
+            prev = getattr(self, '_finish_at', None)
+            self._finish_at = finish if prev is None else 0.85 * prev + 0.15 * finish
+            left = max(0, self._finish_at - time.time())
+            if left < 50:
+                return ', under a minute left (estimate)'
+            m = round(left / 30.0) / 2.0
+            return f', ~{m:g} min left (estimate)'
+        except Exception:
+            return ''
 
     def log(self, s):
         if self:
@@ -554,6 +572,7 @@ class ImportJob:
         def show():
             try:
                 self.stage(None, 'Waiting for your decision...')
+                self.win.waiting = True
                 text = q.get('text', ''); title = 'Eagle Exhumer - ' + q.get('title', 'decision')
                 parent = self.win if self.win else None     # the log window may have been closed
                 if len(opts) >= 2:
@@ -568,6 +587,10 @@ class ImportJob:
                 self.log(f'  decision dialog failed ({ex}) -> {default}')
                 result[0] = default
             finally:
+                try:
+                    self.win.waiting = False
+                except Exception:
+                    pass
                 done.set()
         wx.CallAfter(show)
         done.wait(timeout=840)                         # the fixer gives up after 900 s and takes its default

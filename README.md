@@ -1,8 +1,10 @@
-<p align="center"><img src="docs/icon_256.png" width="160" alt="Eagle Exhumer icon: a tombstone reading R.I.P. EAGLE 1988-2026"></p>
+<p align="center"><img src="docs/banner.png" width="100%" alt="A friendly fairy with a pointy hat and a magic wand wakes a little EAGLE robot in its freshly dug grave; one eye opens, it is booting. Shovel and dirt pile on the left, a tombstone reading R.I.P. EAGLE 1988-2026 behind."></p>
 
 # Eagle Exhumer
 
 **Dig your old EAGLE designs out and bring them to KiCad 10 — with strong quality control.**
+
+*Rest in peace, EAGLE. Then wake up: there is work to do.*
 
 EAGLE support has ended, and many working boards exist only as EAGLE `.sch`/`.brd` files. KiCad's built-in EAGLE importer gets most of the way, but on real boards it leaves defects behind — split GND nets, lost net names, shorts from package copper, missing milling, an outline the zone filler cannot use — some of which only show up when the board comes back from the fab.
 

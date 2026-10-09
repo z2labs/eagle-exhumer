@@ -2621,6 +2621,8 @@ TIMING = {}          # stage -> seconds (benchmark / metrics)
 _T_LAST = [None, None]
 
 
+# progress percentages are TIME fractions, measured on the 18-design corpus (run3 stage timings):
+# the bar then moves roughly linearly in time and the GUI can extrapolate a remaining-time estimate.
 def progress(pct, label):
     """Machine-readable progress line for the plugin window (stripped from the visible log).
     Also closes the timing of the previous stage."""
@@ -2689,7 +2691,7 @@ def main():
                   '(use --refix to force the fix steps again).')
             a.verify_only = True
             a.selftest = True
-    progress(2, 'Reading the project')
+    progress(1, 'Reading the project')
     R.h('Project')
     R.p(f'project `{proj}`, sch `{os.path.basename(root_sch)}`, pcb: {has_pcb}')
     R.p(f'Eagle sch: {esch}  |  Eagle brd: {ebrd}  |  kicad-cli: {cli}')
@@ -2749,15 +2751,15 @@ def main():
             m['sch_values'] = dict(SCH_VAL)
         return comps
 
-    progress(5, 'Quality control: comparing the project with the Eagle source' if a.verify_only
+    progress(2, 'Quality control: comparing the project with the Eagle source' if a.verify_only
              else 'Measuring the native KiCad import')
     comps = verify('current' if a.verify_only else 'before')
     if a.verify_only:
         geom = dict(GEOM_LOG[-1]) if GEOM_LOG else None
         if a.selftest and has_pcb and ebrd:
-            progress(55, 'Quality control: self-check')
+            progress(40, 'Quality control: self-check')
         st = selftest(d, proj, cli, esch, ebrd) if (a.selftest and has_pcb and ebrd) else None
-        progress(88, 'Writing the report')
+        progress(50, 'Writing the report')
         if has_pcb:
             try:
                 check_3d_models(pcb)
@@ -2765,7 +2767,7 @@ def main():
                 R.p(f'3D model check failed: {ex}')
         fails = qc_verdict(st, geom)
         if has_pcb and not a.no_render:
-            progress(90, '3D renders (about a minute)')
+            progress(51, '3D renders (about a minute)')
             render_3d(cli, pcb, d)
         progress(100, 'Done')
         write_metrics(d, proj, esch, ebrd, fails, st, 'verify')
@@ -2780,7 +2782,7 @@ def main():
                 shutil.copy2(f, bk)
         R.h('Backup'); R.p(bk)
 
-    progress(15, 'Fixing the schematic')
+    progress(9, 'Fixing the schematic')
     fix_power_values(sheets)
     if not a.no_label_globalize:
         fix_local_labels(sheets)
@@ -2791,7 +2793,7 @@ def main():
     ensure_symbol_lib(d, proj, sheets, a.dry_run)
 
     if has_pcb:
-        progress(25, 'Fixing the PCB')
+        progress(10, 'Fixing the PCB')
         fix_pcb_sexpr(pcb, comps, a.dry_run, ebrd)
         promote_fp_edge_cuts(pcb, a.dry_run)          # first: milling is classified against the outline
         if ebrd:
@@ -2807,38 +2809,38 @@ def main():
         if a.dry_run:
             R.p('dry run: footprint library step skipped')
         else:
-            progress(35, 'Building the project footprint library')
+            progress(14, 'Building the project footprint library')
             footprint_library(pcb, d, nick, sheets, a.dry_run)
             for s in sheets: s.save()
-        progress(40, 'Design rules and net classes')
+        progress(15, 'Design rules and net classes')
         apply_design_rules(pro, ebrd, a.dry_run)
         if ebrd:
             eagle_dru_rules(d, proj, ebrd, a.dry_run)
 
     if cli and not a.dry_run and os.path.isfile(root_sch):
         sheets = [Sheet(p) for p in sorted(glob.glob(os.path.join(d, '*.kicad_sch')))]
-        progress(45, 'Schematic clean-up (ERC passes)')
+        progress(16, 'Schematic clean-up (ERC passes)')
         fix_stub_wires(cli, root_sch, sheets, tmpdir)
         if not a.no_pwr_flags:
             sheets = [Sheet(p) for p in sorted(glob.glob(os.path.join(d, '*.kicad_sch')))]
-            progress(50, 'Power flags')
+            progress(22, 'Power flags')
             add_pwr_flags(cli, root_sch, sheets, tmpdir)
             for s in sheets: s.save()
         sheets = [Sheet(p) for p in sorted(glob.glob(os.path.join(d, '*.kicad_sch')))]
-        progress(55, 'Restoring Eagle net names')
+        progress(30, 'Restoring Eagle net names')
         restore_net_names(cli, root_sch, sheets, tmpdir, eagle_sch_truth(esch) if esch else None)
         sheets = [Sheet(p) for p in sorted(glob.glob(os.path.join(d, '*.kicad_sch')))]
-        progress(60, 'No-connect flags')
+        progress(33, 'No-connect flags')
         add_no_connects(cli, root_sch, sheets, tmpdir, eagle_sch_truth(esch) if esch else None)
         for s in sheets: s.save()
 
     if not a.dry_run:
-        progress(65, 'Quality control: comparing the result with the Eagle source')
+        progress(39, 'Quality control: comparing the result with the Eagle source')
         verify('after')
     st = None
     geom = dict(GEOM_LOG[-1]) if GEOM_LOG else None
     if (a.selftest or not a.dry_run) and has_pcb and ebrd:
-        progress(80, 'Quality control: self-check')
+        progress(63, 'Quality control: self-check')
         st = selftest(d, proj, cli, esch, ebrd)
     if has_pcb and not a.dry_run:
         try:
@@ -2847,9 +2849,9 @@ def main():
             R.p(f'3D model check failed: {ex}')
     fails = qc_verdict(st, geom) if not a.dry_run else []
     if not a.dry_run:
-        progress(90, 'Writing the report')
+        progress(69, 'Writing the report')
         if has_pcb and not a.no_render:
-            progress(92, '3D renders (about a minute)')
+            progress(70, '3D renders (about a minute)')
             render_3d(cli, pcb, d)
     progress(100, 'Done')
     if not a.dry_run:
