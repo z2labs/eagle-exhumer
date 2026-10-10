@@ -110,14 +110,14 @@ def lbr_to_project(lbr_path, out_dir, name=None):
     extra_pk = [p for p in packages if p not in used_pk]
 
     # ---- nets: one per connected pin (a pin may sit on several pads)
-    # supply pins (direction pwr) keep the EAGLE semantics: their net is named after the pin
+    # supply pins (direction pwr / sup) keep the EAGLE semantics: their net is named after the pin
     pdir = {(sn, pn.get('name')): pn.get('direction', 'io') for sn, sy in symbols.items() for pn in sy.findall('pin')}
     netname, used_names = {}, set()
     for p in parts:
         gsym = dict(p['gates'])
         for g, pin, pads in p['connects']:
-            if pdir.get((gsym.get(g), pin)) == 'pwr':
-                netname[(p['ref'], g, pin)] = (pin, pads.split()); continue
+            if pdir.get((gsym.get(g), pin)) in ('pwr', 'sup'):     # GND@1, GND@2 -> one net GND
+                netname[(p['ref'], g, pin)] = (pin.split('@')[0], pads.split()); continue
             base = f"{p['ref']}_{_safe(pin)}"
             n, i = base, 1
             while n in used_names:
@@ -207,7 +207,7 @@ def lbr_to_project(lbr_path, out_dir, name=None):
         x += w + 5.0; row_h = max(row_h, h); maxx = max(maxx, x); n_col += 1
         if n_col >= 12:
             x, y, row_h, n_col = 0.0, y + row_h + 5.0, 0.0, 0
-    signal = {}
+    signal, padpos = {}, {}
     for (ref, g, pin), (net, pads) in netname.items():
         if ref not in pos:
             continue
@@ -215,6 +215,13 @@ def lbr_to_project(lbr_path, out_dir, name=None):
             signal[net] = ET.SubElement(sigs, 'signal', name=net)
         for pd in pads:
             ET.SubElement(signal[net], 'contactref', element=ref, pad=pd)
+            pk = packages.get(dict((r_, k_) for r_, k_, _ in placed).get(ref))
+            q = pk.find(f"*[@name='{pd}']") if pk is not None else None
+            if q is not None:
+                padpos.setdefault(net, []).append((pos[ref][0] + _f(q, 'x'), pos[ref][1] + _f(q, 'y')))
+    for net, pts in padpos.items():                    # unrouted by design: EAGLE airwires (layer 19)
+        for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
+            ET.SubElement(signal[net], 'wire', x1=f'{x1:.4f}', y1=f'{y1:.4f}', x2=f'{x2:.4f}', y2=f'{y2:.4f}', width='0', layer='19')
     H = y + row_h + 2 * X0; W = maxx + 2 * X0
     for x1, y1, x2, y2 in ((0, 0, W, 0), (W, 0, W, -H), (W, -H, 0, -H), (0, -H, 0, 0)):
         ET.SubElement(plain, 'wire', x1=f'{x1}', y1=f'{y1}', x2=f'{x2}', y2=f'{y2}', width='0', layer='20')
