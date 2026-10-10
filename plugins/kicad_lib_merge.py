@@ -44,7 +44,8 @@ def _geo(node, keys):
                 for y in x[1:]:
                     if isinstance(y, list) and y and y[0] in ('at', 'start', 'mid', 'end', 'center', 'radius',
                                                                'length', 'number', 'name', 'size', 'drill', 'layers', 'pts'):
-                        item.append((y[0],) + tuple(_num(z) if not isinstance(z, list) else tuple(_num(w) for w in z[1:]) for z in y[1:]))
+                        vals = tuple(_num(z) if not isinstance(z, list) else tuple(_num(w) for w in z[1:]) for z in y[1:])
+                        item.append((y[0],) + (tuple(sorted(vals, key=str)) if y[0] == 'layers' else vals))
                     elif not isinstance(y, list):
                         item.append(str(y))
                 out.append(tuple(item))
