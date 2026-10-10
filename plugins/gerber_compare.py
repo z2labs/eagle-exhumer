@@ -589,20 +589,64 @@ def layer_key(path, function=''):
     return None
 
 
+def _unpack(src):
+    """A .zip (as fabs get it) or a folder, possibly with sub-folders -> list of plain files.
+    Zips are extracted flat into a temp folder (member names never used as paths: no traversal);
+    zips inside the folder / zip are unpacked too, one level deep."""
+    import tempfile, zipfile
+    files = []
+
+    def from_zip(z, depth):
+        tmp = tempfile.mkdtemp(prefix='exhumer_mfg_')
+        with zipfile.ZipFile(z) as zf:
+            for i, info in enumerate(zf.infolist()):
+                if info.is_dir() or info.file_size > 200e6:
+                    continue
+                base = os.path.basename(info.filename.replace('\\', '/'))
+                if not base or base.startswith('.'):
+                    continue
+                dst = os.path.join(tmp, f'{i:04d}_{base}')
+                with zf.open(info) as fi, open(dst, 'wb') as fo:
+                    fo.write(fi.read())
+                if base.lower().endswith('.zip') and depth < 1:
+                    from_zip(dst, depth + 1)
+                else:
+                    files.append(dst)
+
+    if os.path.isfile(src) and src.lower().endswith('.zip'):
+        from_zip(src, 0)
+    else:
+        for root, _, names in os.walk(src):
+            for n in sorted(names):
+                p = os.path.join(root, n)
+                if n.lower().endswith('.zip'):
+                    from_zip(p, 0)
+                else:
+                    files.append(p)
+    return sorted(files)
+
+
+def _display(p):
+    b = os.path.basename(p)
+    return b[5:] if re.match(r'\d{4}_', b) else b
+
+
 def collect(dirpath, geo):
-    """{layer key: Gerber}, [holes]"""
+    """{layer key: Gerber}, [holes] from a folder (sub-folders included) or a .zip"""
     layers, holes, notes = {}, [], []
-    for p in sorted(glob.glob(os.path.join(dirpath, '*'))):
+    for p in _unpack(dirpath):
         if not os.path.isfile(p):
             continue
         ext = os.path.splitext(p)[1].lower()
+        if ext in ('.pdf', '.png', '.jpg', '.zip', '.rar', '.7z', '.xlsx', '.csv', '.pos', '.gbrjob', '.json', '.html'):
+            continue
         head = open(p, encoding='latin-1').read(400)
         if ext in ('.xnc', '.drl', '.drd', '.exc', '.txt') and ('M48' in head or head.lstrip().startswith(('T', '%', ';'))):
-            holes += read_excellon(p); notes.append(f'drill: {os.path.basename(p)}'); continue
+            holes += read_excellon(p); notes.append(f'drill: {_display(p)}'); continue
         if '%FS' not in head and 'G04' not in head and '%MO' not in head:
             continue
         g = Gerber(p, geo)
-        k = layer_key(p, g.function)
+        k = layer_key(_display(p), g.function)
         if k == 'outline':
             g = Gerber(p, geo, stroke=0.1)
         if k is None:
@@ -738,7 +782,7 @@ def compare(eagle_dir, kicad_dir, brd=None, tol=0.03, geo=None, log=print):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('eagle_dir'); ap.add_argument('kicad_dir')
+    ap.add_argument('eagle_dir', help='folder or .zip with the EAGLE CAM output'); ap.add_argument('kicad_dir')
     ap.add_argument('--brd'); ap.add_argument('--json'); ap.add_argument('--tol', type=float, default=0.03)
     a = ap.parse_args()
     r = compare(a.eagle_dir, a.kicad_dir, a.brd, a.tol)
