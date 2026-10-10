@@ -77,6 +77,9 @@ class ShapelyGeo:
     def bbox(self, g):
         return None if g.is_empty else g.bounds
 
+    def from_prims(self, prims, dx=0.0, dy=0.0):
+        return _runs_to_geom(self, prims, dx, dy)
+
 
 class KicadGeo:
     """SHAPE_POLY_SET from KiCad's pcbnew module, internal units nm."""
@@ -102,6 +105,9 @@ class KicadGeo:
             return None
         b = g.BBox()
         return (b.GetX() / self.S, b.GetY() / self.S, b.GetRight() / self.S, b.GetBottom() / self.S)
+
+    def from_prims(self, prims, dx=0.0, dy=0.0):
+        return _runs_to_geom(self, prims, dx, dy)
 
     def _copy(self, a):
         c = self.p.SHAPE_POLY_SET(); c.Append(a); return c
@@ -150,11 +156,128 @@ class KicadGeo:
         return out
 
 
-def backend():
-    try:
-        return ShapelyGeo()
-    except ImportError:
-        return KicadGeo()
+class RasterGeo:
+    """numpy + PIL raster backend (both ship with KiCad's Python): polygons drawn in Gerber order
+    (dark = set, clear = erase) on one common canvas, 20 um per pixel by default. Fast; the
+    opening in compare() removes the one-pixel edge noise."""
+    name = 'raster'
+
+    def __init__(self, bounds, px=0.025):
+        import numpy as np
+        from PIL import Image, ImageDraw
+        self.np, self.Image, self.ImageDraw = np, Image, ImageDraw
+        x0, y0, x1, y1 = bounds
+        m = 1.0
+        self.x0, self.y0, self.px = x0 - m, y0 - m, px
+        self.W = int((x1 - x0 + 2 * m) / px) + 1
+        self.H = int((y1 - y0 + 2 * m) / px) + 1
+
+    def _xy(self, pts, dx, dy):
+        x0, y0, px, H = self.x0, self.y0, self.px, self.H
+        return [((x + dx - x0) / px, H - 1 - (y + dy - y0) / px) for x, y in pts]
+
+    def from_prims(self, prims, dx=0.0, dy=0.0):
+        img = self.Image.new('1', (self.W, self.H), 0)
+        dr = self.ImageDraw.Draw(img)
+        for dark, pts in prims:
+            if len(pts) >= 3:
+                dr.polygon(self._xy(pts, dx, dy), fill=1 if dark else 0)
+        return self.np.array(img, dtype=bool)
+
+    def poly(self, pts):
+        return self.from_prims([(True, pts)])
+
+    def empty(self):
+        return self.np.zeros((self.H, self.W), dtype=bool)
+
+    def union(self, geoms):
+        out = self.empty()
+        for g in geoms:
+            out |= g
+        return out
+
+    def diff(self, a, b):
+        return a & ~b
+
+    def inter(self, a, b):
+        return a & b
+
+    def xor(self, a, b):
+        return a ^ b
+
+    def area(self, g):
+        return float(g.sum()) * self.px * self.px
+
+    def translate(self, g, dx, dy):
+        raise NotImplementedError('raster: shift while drawing (from_prims dx, dy)')
+
+    def _shift_min(self, g, n, op):
+        np = self.np
+        for _ in range(n):
+            h = g.copy()
+            h[1:, :] = op(h[1:, :], g[:-1, :]); h[:-1, :] = op(h[:-1, :], g[1:, :])
+            h[:, 1:] = op(h[:, 1:], g[:, :-1]); h[:, :-1] = op(h[:, :-1], g[:, 1:])
+            g = h
+        return g
+
+    def opening(self, g, r):
+        n = max(1, int(round(r / self.px)))
+        np = self.np
+        return self._shift_min(self._shift_min(g, n, np.logical_and), n, np.logical_or)
+
+    def bbox(self, g):
+        np = self.np
+        ys, xs = np.nonzero(g)
+        if not len(xs):
+            return None
+        px = self.px
+        return (self.x0 + xs.min() * px, self.y0 + (self.H - 1 - ys.max()) * px,
+                self.x0 + xs.max() * px, self.y0 + (self.H - 1 - ys.min()) * px)
+
+    def parts(self, g, tile_mm=0.5):
+        """Clusters of difference pixels on a 0.5 mm tile grid (8-connected tiles)."""
+        np = self.np
+        t = max(1, int(round(tile_mm / self.px)))
+        H2, W2 = (self.H + t - 1) // t, (self.W + t - 1) // t
+        pad = np.zeros((H2 * t, W2 * t), dtype=bool); pad[:self.H, :self.W] = g
+        cnt = pad.reshape(H2, t, W2, t).sum(axis=(1, 3))
+        ys, xs = np.nonzero(cnt)
+        seen = set(); out = []
+        occ = set(zip(ys.tolist(), xs.tolist()))
+        for start in occ:
+            if start in seen:
+                continue
+            stack = [start]; seen.add(start); tiles = []
+            while stack:
+                y, x = stack.pop(); tiles.append((y, x))
+                for dy in (-1, 0, 1):
+                    for dx in (-1, 0, 1):
+                        nb = (y + dy, x + dx)
+                        if nb in occ and nb not in seen:
+                            seen.add(nb); stack.append(nb)
+            n = sum(int(cnt[y, x]) for y, x in tiles)
+            cy = sum(int(cnt[y, x]) * (y + 0.5) for y, x in tiles) / n * t
+            cx = sum(int(cnt[y, x]) * (x + 0.5) for y, x in tiles) / n * t
+            ty = [y for y, _ in tiles]; tx = [x for _, x in tiles]
+            out.append((n * self.px ** 2, self.x0 + cx * self.px, self.y0 + (self.H - 1 - cy) * self.px,
+                        (max(tx) - min(tx) + 1) * t * self.px, (max(ty) - min(ty) + 1) * t * self.px))
+        return out
+
+
+def backend(bounds=None, prefer=None):
+    """shapely (exact, development) if installed, else the raster backend (numpy + PIL ship with
+    KiCad), else KiCad's SHAPE_POLY_SET (exact but slow on large boards)."""
+    if prefer in (None, 'shapely'):
+        try:
+            return ShapelyGeo()
+        except ImportError:
+            pass
+    if prefer in (None, 'raster') and bounds:
+        try:
+            return RasterGeo(bounds)
+        except ImportError:
+            pass
+    return KicadGeo()
 
 
 # --------------------------------------------------------------------------- shapes
@@ -488,20 +611,31 @@ class Gerber:
                 for dark, pts in ap['shapes']:
                     prims.append((polarity if dark else not polarity, [(nx + a, ny + b) for a, b in pts]))
                 x, y = nx, ny
-        # polarity runs -> geometry
-        geom = geo.empty(); run = []; run_dark = True
-        def flush():
-            nonlocal geom
-            if not run:
-                return
-            u = geo.union([geo.poly(p) for p in run if len(p) >= 3])
-            geom = geo.union([geom, u]) if run_dark else geo.diff(geom, u)
-        for dark, pts in prims:
-            if dark != run_dark:
-                flush(); run = []; run_dark = dark
-            run.append(pts)
-        flush()
-        self.geom = geom
+        self.prims = prims
+        xs = [x for _, pts in prims for x, _ in pts]; ys = [y for _, pts in prims for _, y in pts]
+        self.bounds = (min(xs), min(ys), max(xs), max(ys)) if xs else None
+
+    def build(self, geo, dx=0.0, dy=0.0):
+        """Geometry of the layer in the backend, shifted by (dx, dy)."""
+        self.geom = geo.from_prims(self.prims, dx, dy)
+        return self.geom
+
+
+def _runs_to_geom(geo, prims, dx, dy):
+    """Vector backends: polarity runs -> union / subtract (Gerber painter's model)."""
+    geom = geo.empty(); run = []; run_dark = True
+    def flush():
+        nonlocal geom
+        if not run:
+            return
+        u = geo.union([geo.poly([(x + dx, y + dy) for x, y in p]) for p in run if len(p) >= 3])
+        geom = geo.union([geom, u]) if run_dark else geo.diff(geom, u)
+    for dark, pts in prims:
+        if dark != run_dark:
+            flush(); run = []; run_dark = dark
+        run.append(pts)
+    flush()
+    return geom
 
 
 # --------------------------------------------------------------------------- Excellon
@@ -806,28 +940,32 @@ def eagle_pours(brd_path, geo):
     return {k: geo.union(v) for k, v in out.items()}
 
 
-def compare(eagle_dir, kicad_dir, brd=None, tol=0.03, geo=None, log=print):
-    geo = geo or backend()
-    le, he, ne = collect(eagle_dir, geo)
-    lk, hk, nk = collect(kicad_dir, geo)
-    res = dict(backend=geo.name, notes=ne + nk, layers={}, drill=None, align=None)
+def compare(eagle_dir, kicad_dir, brd=None, tol=0.03, geo=None, log=print, prefer=None):
+    le, he, ne = collect(eagle_dir, None)
+    lk, hk, nk = collect(kicad_dir, None)
     (dx, dy), votes = align(he, hk) if (he and hk) else ((None, None), 0)
+    notes = ne + nk
     if dx is None:
-        res['notes'].append('no drill holes to align on - layers compared without alignment')
+        notes.append('no drill holes to align on - layers compared without alignment')
         dx = dy = 0.0
+    bb = [g.bounds for g in le.values() if g.bounds] + \
+         [(b[0] + dx, b[1] + dy, b[2] + dx, b[3] + dy) for b in (g.bounds for g in lk.values()) if b]
+    bounds = (min(b[0] for b in bb), min(b[1] for b in bb), max(b[2] for b in bb), max(b[3] for b in bb)) if bb else None
+    geo = geo or backend(bounds, prefer)
+    res = dict(backend=geo.name, notes=notes, layers={}, drill=None, align=None)
     res['align'] = dict(dx=round(dx, 4), dy=round(dy, 4), votes=votes)
     if he and hk:
         res['drill'] = compare_drills(he, hk, dx, dy)
     pours = eagle_pours(brd, geo) if brd else {}
-    board_bb = geo.bbox(le['outline'].geom) if 'outline' in le else None
+    board_bb = geo.bbox(le['outline'].build(geo)) if 'outline' in le else None
     for k in sorted(set(le) | set(lk)):
         if k.startswith('silk:'):
             continue                                # fonts differ between tools: not compared
         if k not in le or k not in lk:
             res['layers'][k] = dict(only_in='eagle' if k in le else 'kicad')
             continue
-        a = le[k].geom
-        b = geo.translate(lk[k].geom, dx, dy)
+        a = le[k].build(geo)                        # built per layer and released: raster memory
+        b = lk[k].build(geo, dx, dy)
         x = geo.xor(a, b)
         sig = geo.opening(x, tol)
         ae, ak = geo.area(a), geo.area(b)
@@ -853,6 +991,8 @@ def compare(eagle_dir, kicad_dir, brd=None, tol=0.03, geo=None, log=print):
                           for a_, cx, cy, w, h in spots[:40]]
         entry['n_spots'] = len(spots)
         res['layers'][k] = entry
+        le[k].geom = lk[k].geom = None
+        a = b = x = sig = None
         log(f"  {k:10s} eagle {ae:10.2f}  kicad {ak:10.2f}  xor {entry['xor_mm2']:9.3f}  significant {entry['significant_mm2']:8.3f} mm2"
             + (f"  (outside pours {entry['significant_outside_pours_mm2']:.3f})" if 'significant_outside_pours_mm2' in entry else '')
             + f"  spots {len(spots)}")
@@ -897,8 +1037,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('eagle_dir', help='folder or .zip with the EAGLE CAM output'); ap.add_argument('kicad_dir')
     ap.add_argument('--brd'); ap.add_argument('--json'); ap.add_argument('--tol', type=float, default=0.03)
+    ap.add_argument('--backend', choices=('shapely', 'raster', 'kicad'))
     a = ap.parse_args()
-    r = compare(a.eagle_dir, a.kicad_dir, a.brd, a.tol)
+    r = compare(a.eagle_dir, a.kicad_dir, a.brd, a.tol, prefer=a.backend)
     d = r['drill']
     if d:
         print(f"  drill: eagle {d['eagle']}, kicad {d['kicad']}, matched {d['matched']}, missing in KiCad {len(d['missing_in_kicad'])}, "
