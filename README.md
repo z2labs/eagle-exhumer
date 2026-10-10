@@ -77,16 +77,16 @@ Use KiCad's own Python (Windows: `C:\Program Files\KiCad\10.0\bin\python.exe`). 
 
 19 real designs: 11 open-hardware boards from [Olimex OLINUXINO](https://github.com/OLIMEX/OLINUXINO/tree/master/HARDWARE), 7 boards from Zoltan Doczi's own PCB designs and one private 4-sheet EAGLE 9.6.2 design — 3,214 parts, 14,044 pads, 7,610 vias, 1 to 6 copper layers. **18 of 19 pass the quality control**; the one FAIL is a reference collision (`GND` vs `GND0`) that needs a human decision.
 
-KiCad 10.0.6 native import vs. after Eagle Exhumer 0.9.7, 18 batch designs (full re-run of the corpus, 2026-10-08):
+KiCad 10.0.6 native import vs. after Eagle Exhumer, 18 batch designs (full re-runs of the corpus with 0.9.7 on 2026-10-08 and with 0.9.10 on 2026-10-10):
 
 | | native import | after fix |
 |---|---|---|
 | open (split) nets in the schematic | 49 | **0** |
 | lost Eagle net names | 306 | **0** |
 | ERC errors | 367 | 16 |
-| DRC shorting items | 347 | 26 |
+| DRC shorting items | 347 | 26–33 |
 
-All 18 pass the quality control with a 6/6 self-check. Found after that run and fixed in 0.9.8: two of the 18 (iMX233-OLinuXino-Micro Rev C/D, 2-layer boards with a 4-layer EAGLE rule set) had been imported as 4-layer KiCad boards with empty inner layers - the quality control had no layer-count item. It has one now (defect #15), and the corpus passes 18/18 with it. The remaining ERC errors are 1–3 `power_pin_not_driven` / `pin_to_pin` items per board where the schematic has no explicit power source (a PWR_FLAG decision for a human; the count varies by ±1 between runs). Remaining DRC items are properties of the original EAGLE designs (e.g. clearance values the original violates, printed jumpers), which the conversion carries over rather than redesigning.
+All 18 pass the quality control with a 6/6 self-check. Found after that run and fixed in 0.9.8: two of the 18 (iMX233-OLinuXino-Micro Rev C/D, 2-layer boards with a 4-layer EAGLE rule set) had been imported as 4-layer KiCad boards with empty inner layers - the quality control had no layer-count item. It has one now (defect #15), and the corpus passes 18/18 with it. 0.9.10 (fixes from the first external test, a 21-sheet, 8-layer design) passes 18/18 too, with a 6/6 self-check. The shorting count is a range because KiCad's DRC reports the same printed-jumper contacts sometimes as one pad–track pair, sometimes as several track–track pairs; the locations are identical from run to run. The remaining ERC errors are 1–3 `power_pin_not_driven` / `pin_to_pin` items per board where the schematic has no explicit power source (a PWR_FLAG decision for a human; the count varies by ±1 between runs). Remaining DRC items are properties of the original EAGLE designs (e.g. clearance values the original violates, printed jumpers), which the conversion carries over rather than redesigning.
 
 **Test report:** [docs/test-report-2026-10-08.pdf](docs/test-report-2026-10-08.pdf) — per-design results, the history of the four full corpus runs (14/18 → 18/18, shorting items 65 → 77 → 26), what remains after the fix and why, timings, renders.
 
