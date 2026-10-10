@@ -642,7 +642,7 @@ def _runs_to_geom(geo, prims, dx, dy):
 
 def read_excellon(path):
     """[(x_mm, y_mm, dia_mm, slot_or_None)]"""
-    unit, tz, fmt = INCH, False, None
+    unit, tz, fmt = INCH, False, None          # tz: True = LZ format (pad on the right)
     tools, holes = {}, []
     cur = None; x = y = 0.0
     header = True
@@ -655,12 +655,12 @@ def read_excellon(path):
         if s in ('%', 'M95'):
             header = False; continue
         if s.startswith(('METRIC', 'M71')):
-            unit = 1.0; tz = 'TZ' in s
+            unit = 1.0; tz = 'LZ' in s
             m = re.search(r'0+\.0+', s)
             fmt = (m.group(0).index('.'), len(m.group(0)) - m.group(0).index('.') - 1) if m else fmt
             continue
         if s.startswith(('INCH', 'M72')):
-            unit = INCH; tz = 'TZ' in s
+            unit = INCH; tz = 'LZ' in s
             continue
         m = re.match(r'T(\d+)(?:F\d+)?(?:S\d+)?C([\d.]+)', s)
         if m:
@@ -673,8 +673,8 @@ def read_excellon(path):
                 return float(v) * unit
             neg = v.startswith('-'); v = v.lstrip('+-')
             i, d = fmt or ((2, 4) if unit == INCH else (3, 3))
-            if tz:
-                v = v.ljust(i + d, '0')
+            if tz:                                  # LZ: leading zeros kept, trailing ones omitted
+                v = v.ljust(i + d, '0')             # (TZ: trailing kept -> plain integer / 10^d)
             r = int(v) / 10 ** d
             return (-r if neg else r) * unit
         m = re.match(r'(?:G0?[01])?X([+-]?[\d.]+)?Y?([+-]?[\d.]+)?(?:G85X([+-]?[\d.]+)Y([+-]?[\d.]+))?', s)
