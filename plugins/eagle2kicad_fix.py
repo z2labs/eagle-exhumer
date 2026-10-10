@@ -2500,14 +2500,19 @@ def mfg_check(d, pcb, ref, ebrd, cli):
         for t, l in (('FAIL', fails), ('WARN', warns), ('info', infos)):
             for x in l:
                 R.p(f'{t}  {x}')
-        if not fails:
+        evaluated = not any('does not match this board' in w for w in warns)
+        if fails:
+            pass
+        elif evaluated:
             R.p('**MATCH** - copper (outside pours), solder mask, paste, drill identical to the EAGLE manufacturing files')
-        MFG.update(evaluated=not any('does not match this board' in w for w in warns), fails=fails, warnings=warns,
+        else:
+            R.p('**NOT VERIFIED** - the manufacturing files given are not of this board (other revision?)')
+        MFG.update(given=True, evaluated=evaluated, fails=fails, warnings=warns,
                    infos=infos, layers={k: {kk: vv for kk, vv in v.items() if kk != 'spots'} for k, v in r['layers'].items()},
                    drill={k: (len(v) if isinstance(v, list) else v) for k, v in dd.items()}, align=r['align'])
     except Exception as ex:
         R.p(f'manufacturing-file comparison failed: {ex}')
-        MFG.update(evaluated=False, fails=[], warnings=[f'comparison failed: {ex}'], infos=[])
+        MFG.update(given=True, evaluated=False, fails=[], warnings=[f'comparison failed: {ex}'], infos=[])
     finally:
         for f in glob.glob(os.path.join(d, '_mfg_filled.*')):
             try:
@@ -2549,6 +2554,8 @@ def qc_verdict(selftest_ok=None, geom=None):
     else:
         R.p('**PASS** - netlists, pads, geometry, values identical to the Eagle source; selftest passed'
             + ('; Gerbers match the EAGLE manufacturing files' if MFG.get('evaluated') else
+               '; manufacturing files NOT verified: ' + '; '.join(MFG.get('warnings') or ['not comparable'])[:200]
+               if MFG.get('given') else
                '; no EAGLE manufacturing files given (recommended: --mfg <Gerber folder or zip>)'))
     return fails
 
