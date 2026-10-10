@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/banner.png" width="100%" alt="A friendly fairy with a pointy hat and a magic wand wakes a little EAGLE robot in its freshly dug grave; one eye opens, it is booting. Shovel and dirt pile on the left, a tombstone reading R.I.P. EAGLE 1988-2026 behind, a black cat with white stripes watching from the right, three bats in the moonlit sky."></p>
+<p align="center"><img src="docs/social-preview.png" width="100%" alt="Eagle Exhumer: on the left, the plugin's own progress output in a terminal over green Matrix-style rain - board and schematic import, repairs, quality control 2278/2278 pads, 0 open nets, 0 shorts, self-check 6/6, progress bar at 82%; on the right, a friendly fairy wakes a little EAGLE robot in its grave next to a tombstone reading R.I.P. EAGLE 1988-2026, a striped black cat watching."></p>
 
 # Eagle Exhumer
 
