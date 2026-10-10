@@ -737,6 +737,15 @@ def layer_key(path, function=''):
             if key == 'cu:L':                      # EAGLE 9 CAM: copper_l1 .. copper_lN, resolved in collect()
                 return f'cu:L{int(m.group(2))}'
             return key
+    ext = os.path.splitext(n)[1]                   # Protel-style extensions (older EAGLE CAM jobs)
+    prot = {'.gtl': 'cu:top', '.gbl': 'cu:bot', '.gts': 'mask:top', '.gbs': 'mask:bot',
+            '.gtp': 'paste:top', '.gbp': 'paste:bot', '.gto': 'silk:top', '.gbo': 'silk:bot',
+            '.gml': 'outline', '.gko': 'outline', '.gm1': 'outline'}
+    if ext in prot:
+        return prot[ext]
+    m = re.match(r'\.g(?:l)?(\d+)$', ext)          # .g2 / .gl2 = inner copper layer 2 (1-based incl. top)
+    if m and int(m.group(1)) >= 2:
+        return f'cu:in{int(m.group(1)) - 1}'
     return None
 
 
@@ -819,10 +828,12 @@ def find_mfg(eagle_file):
             continue
         for n in names:
             p = os.path.join(root, n)
+            if 'kicad' in n.lower() or n.startswith('_'):
+                continue                           # our own exports / temp folders are never the reference
             if (os.path.isdir(p) and MFG_NAME.search(n)) or (n.lower().endswith('.zip') and (MFG_NAME.search(n) or stem in n.lower())):
                 if looks_like_mfg(p):
                     cands.append(p)
-    cands.sort(key=lambda p: (stem in os.path.basename(p).lower(), os.path.getmtime(p)), reverse=True)
+    cands.sort(key=lambda p: (stem in os.path.basename(p).lower(), 'eagle' in os.path.basename(p).lower(), os.path.getmtime(p)), reverse=True)
     return cands[0] if cands else None
 
 
@@ -1016,7 +1027,10 @@ def verdict(res, spot_min=0.05):
         warns.append('drill files missing on one side - drill not compared')
     for k, e in sorted(res['layers'].items()):
         if 'only_in' in e:
-            (fails if k.startswith(('cu:', 'mask:')) else warns).append(f'{k}: only in the {e["only_in"]} files')
+            if e['only_in'] == 'kicad':          # reference set incomplete (layer not plotted by the CAM job)
+                warns.append(f'{k}: only in the kicad files - not in the EAGLE reference, not compared')
+            else:
+                (fails if k.startswith(('cu:', 'mask:')) else warns).append(f'{k}: only in the {e["only_in"]} files')
             continue
         big = [s for s in e['spots'] if s['mm2'] >= spot_min]
         where = '; '.join(f"({s['x']:.2f}, {s['y']:.2f}) {s['mm2']:.2f} mm2" for s in big[:5])
