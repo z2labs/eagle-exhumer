@@ -1011,10 +1011,27 @@ def compare(eagle_dir, kicad_dir, brd=None, tol=0.03, geo=None, log=print, prefe
     if dx is None:
         notes.append('no drill holes to align on - layers compared without alignment')
         dx = dy = 0.0
+    panel = None
+    if he and hk and len(he) >= 1.5 * len(hk):
+        # the reference is a panel (several boards, rails, fiducials): compare the one copy the drill
+        # alignment found - crop the EAGLE side to the KiCad board extent placed onto that copy
+        kb = lk['outline'].bounds if 'outline' in lk and lk['outline'].bounds else \
+            (min(h[0] for h in hk), min(h[1] for h in hk), max(h[0] for h in hk), max(h[1] for h in hk))
+        m = 0.3
+        region = (kb[0] + dx - m, kb[1] + dy - m, kb[2] + dx + m, kb[3] + dy + m)
+        inside = [h for h in he if region[0] <= h[0] <= region[2] and region[1] <= h[1] <= region[3]]
+        if abs(len(inside) - len(hk)) <= max(2, 0.05 * len(hk)):
+            notes.append(f'EAGLE reference is a panel ({len(he)} holes for a {len(hk)}-hole board): '
+                         f'compared on the copy at ({region[0]:.1f}, {region[1]:.1f})')
+            he, panel = inside, region
     bb = [g.bounds for g in le.values() if g.bounds] + \
          [(b[0] + dx, b[1] + dy, b[2] + dx, b[3] + dy) for b in (g.bounds for g in lk.values()) if b]
     bounds = (min(b[0] for b in bb), min(b[1] for b in bb), max(b[2] for b in bb), max(b[3] for b in bb)) if bb else None
+    if panel:
+        bounds = panel
     geo = geo or backend(bounds, prefer)
+    clip = (lambda g: geo.inter(g, geo.poly([(panel[0], panel[1]), (panel[2], panel[1]), (panel[2], panel[3]), (panel[0], panel[3])]))) \
+        if panel else (lambda g: g)
     res = dict(backend=geo.name, notes=notes, layers={}, drill=None, align=None)
     res['align'] = dict(dx=round(dx, 4), dy=round(dy, 4), votes=votes)
     if he and hk:
@@ -1023,7 +1040,7 @@ def compare(eagle_dir, kicad_dir, brd=None, tol=0.03, geo=None, log=print, prefe
     if abs(off[0]) > 0.01 or abs(off[1]) > 0.01:
         notes.append(f'EAGLE CAM frame is offset against the .brd by ({off[0]:.3f}, {off[1]:.3f}) mm ({ov} vias) - pours moved along')
     pours = eagle_pours(brd, geo, off) if brd else {}
-    board_bb = geo.bbox(le['outline'].build(geo)) if 'outline' in le else None
+    board_bb = geo.bbox(clip(le['outline'].build(geo))) if 'outline' in le else None
     band = None
     for k in sorted(set(le) | set(lk)):
         if k.startswith('silk:'):
@@ -1031,7 +1048,7 @@ def compare(eagle_dir, kicad_dir, brd=None, tol=0.03, geo=None, log=print, prefe
         if k not in le or k not in lk:
             res['layers'][k] = dict(only_in='eagle' if k in le else 'kicad')
             continue
-        a = le[k].build(geo)                        # built per layer and released: raster memory
+        a = clip(le[k].build(geo))                  # built per layer and released: raster memory
         b = lk[k].build(geo, dx, dy)
         x = geo.xor(a, b)
         sig = geo.opening(x, tol)
@@ -1048,7 +1065,7 @@ def compare(eagle_dir, kicad_dir, brd=None, tol=0.03, geo=None, log=print, prefe
         sk = geo.opening(geo.diff(b, a), tol)
         if board_bb and 'outline' in le and k != 'outline' and _frame(geo.parts(se), board_bb):
             if band is None:                        # older EAGLE CAM jobs plot the Dimension layer into every layer
-                band = Gerber(le['outline'].path, geo, stroke=0.6).build(geo)
+                band = clip(Gerber(le['outline'].path, geo, stroke=0.6).build(geo))
             se = geo.diff(se, band)
             entry['eagle_plots_outline'] = True
             notes.append(f'{k}: the EAGLE CAM job plots the board outline into this layer - outline band ignored')
