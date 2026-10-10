@@ -1382,6 +1382,46 @@ def _via_restring(tree, rules):
     return n
 
 
+def eagle_pad_ring(rules):
+    """(rv, lo, hi) of Eagle's pad restring rule (top layer) and whether top/inner/bottom agree"""
+    g = lambda k, d: _unit(rules.get(k)) if rules.get(k) else d
+    val = lambda L: (float(rules.get(f'rvPad{L}', '0.25') or 0.25), g(f'rlMinPad{L}', 0.254), g(f'rlMaxPad{L}', 0.508))
+    t, i, b = val('Top'), val('Inner'), val('Bottom')
+    return t, (t == i == b)
+
+
+def eagle_pad_diameter(drill, diameter, ring):
+    """Eagle's copper diameter of a through-hole pad: max(package diameter, drill + 2*restring)"""
+    rv, lo, hi = ring
+    return max(diameter or 0.0, drill + 2 * min(max(drill * rv, lo), hi))
+
+
+def _pad_restring(tree, rules):
+    """Eagle draws a through-hole pad with max(package diameter, drill + 2*restring), restring =
+    clamp(rvPad*drill, rlMinPad, rlMaxPad). KiCad's importer keeps the package diameter: rings far
+    below Eagle's (0.05 instead of 0.15 mm on one board), smaller mask openings, and copper that
+    differs from Eagle's CAM output (found by the Gerber comparison on 12 Olimex boards)."""
+    ring, uniform = eagle_pad_ring(rules)
+    n = 0
+    for fp in kids(tree, 'footprint'):
+        for p in kids(fp, 'pad'):
+            if len(p) < 3 or p[2] != 'thru_hole':
+                continue
+            sz, dr = kid(p, 'size'), kid(p, 'drill')
+            if sz is None or dr is None:
+                continue
+            ds = [float(x) for x in dr[1:] if not isinstance(x, list) and x != 'oval']
+            if not ds:
+                continue
+            sx, sy = float(sz[1]), float(sz[2])
+            need = eagle_pad_diameter(min(ds), 0.0, ring)
+            if min(sx, sy) < need - 1e-4:
+                f = need / min(sx, sy)                  # long pads keep their elongation
+                sz[1], sz[2] = f'{round(sx * f, 4):g}', f'{round(sy * f, 4):g}'
+                n += 1
+    return n, uniform
+
+
 def eagle_dru_rules(proj_dir, proj, brd, dry):
     """Eagle's clearance matrix (wire/pad/via/smd pairs) -> KiCad custom rules (.kicad_dru)."""
     rules, _ = eagle_brd_rules(brd)
@@ -1484,6 +1524,7 @@ def verify_geometry(pcb_path, ebrd):
         for p in lib.findall('packages/package'):
             pk[(lib.get('name'), lib.get('urn', ''), p.get('name'))] = p
     n_pad = n_padpos = n_padsize = n_paddrill = n_padmiss = 0
+    ring, _ = eagle_pad_ring(eagle_brd_rules(ebrd)[0])
     for e in els:
         fp = fps.get(kref(e.get('name')))
         if fp is None:
@@ -1543,6 +1584,15 @@ def verify_geometry(pcb_path, ebrd):
                     if n_padsize <= 5: issues.append(f'smd `{kref(e.get("name"))}.{q.get("name")}` size Eagle {es}, KiCad {[round(v, 4) for v in ks]}')
             else:
                 dr = float(q.get('drill'))
+                want = eagle_pad_diameter(dr, _unit(q.get('diameter')) or 0.0, ring)
+                try:
+                    bs = best.GetSize(pcbnew.F_Cu)
+                except Exception:
+                    bs = best.GetSize()
+                have = min(bs.x, bs.y) / 1e6
+                if abs(have - want) > 0.005:
+                    n_padsize += 1
+                    if n_padsize <= 5: issues.append(f'pad `{kref(e.get("name"))}.{q.get("name")}` copper diameter Eagle {want:.4f}, KiCad {have:.4f}')
                 if abs(best.GetDrillSize().x / 1e6 - dr) > 0.005:
                     n_paddrill += 1
                     if n_paddrill <= 5: issues.append(f'pad `{kref(e.get("name"))}.{q.get("name")}` drill Eagle {dr}, KiCad {best.GetDrillSize().x / 1e6:g}')
@@ -2041,11 +2091,16 @@ def fix_pcb_sexpr(pcb_path, sch_refs, dry, ebrd=None):
     n_via = _via_restring(tree, eagle_brd_rules(ebrd)[0]) if ebrd else 0
     n_zt, zt_note = _zone_thermals(tree, ebrd) if ebrd else (0, '')
     n_cy = sum(_open_courtyard_to_fab(fp) for fp in kids(tree, 'footprint'))
+
+
+    n_pr, pr_uniform = _pad_restring(tree, eagle_brd_rules(ebrd)[0]) if ebrd else (0, True)
     R.p(f'{n_undef} items moved from UNDEFINED layer to Dwgs.User')
     R.p(f'{n_np} NPTH holes: net-less copper ring removed (pad size = drill)')
     R.p(f'{n_cu} package copper polygons -> custom pads with the net of the pad they touch (Eagle polygon-in-package)')
     R.p(f'{n_nt} net-tie pad groups (copper links inside Eagle packages, e.g. board-mounted 0R arrays)')
     R.p(f'{n_via} vias enlarged to Eagle restring (drill + 2 x clamp(rvViaOuter*drill, rlMin, rlMax))')
+    R.p(f'{n_pr} through-hole pads enlarged to Eagle restring (drill + 2 x clamp(rvPad*drill, rlMinPad, rlMaxPad))'
+        + ('' if pr_uniform else ' - NOTE: Eagle top/inner/bottom pad rules differ, the top rule is used on every layer'))
     R.p(f'{n_bo} footprints without schematic symbol marked board_only (holes, logos, fiducials)')
     R.p(f'{n_zt} copper zones: thermal relief from Eagle {zt_note}')
     R.p(f'{n_cy} footprints: Eagle courtyard repaired (duplicate lines removed; a still open outline '

@@ -309,6 +309,35 @@ class DialogDriver(threading.Thread):
                 U.ShowWindow(h, 7)                       # SW_SHOWMINNOACTIVE
                 self.old_frames.add(h)
 
+    def _enter(self, d, ed, ok, path, tries=4):
+        """Type the path, verify it reads back, press OK and make sure the dialog took it. A file
+        dialog that was still building can drop or garble the text and then answers with a 'file not
+        found' box (seen on loaded machines): that box is closed and the path entered again."""
+        for k in range(tries):
+            U.SendMessageW(ed, WM_SETTEXT, 0, ctypes.c_wchar_p(path))
+            time.sleep(0.3 + 0.4 * k)
+            buf = ctypes.create_unicode_buffer(2048)
+            U.SendMessageW(ed, 0x000D, 2048, buf)            # WM_GETTEXT
+            if buf.value != path:
+                continue
+            U.SendMessageW(ok, BM_CLICK, 0, None)
+            t1 = time.time()
+            while time.time() - t1 < 3.0:
+                if not U.IsWindow(d) or not U.IsWindowVisible(d):
+                    return True                              # the dialog closed: path accepted
+                err = [x for x in _dialogs(self.pid) if x != d and x not in self.seen and not _name_edit(x)]
+                if err:
+                    self.log(f'  [dialog "{_title(d)}"] retry {k + 1}: {dialog_text(err[0])[:80]}')
+                    b = U.GetDlgItem(err[0], 1) or U.GetDlgItem(err[0], 2)
+                    if b:
+                        U.SendMessageW(b, BM_CLICK, 0, None)
+                    time.sleep(0.5)
+                    break
+                time.sleep(0.1)
+            else:
+                return True                                  # still open but no complaint: next step decides
+        return False
+
     def run(self):
         for path in self.steps:
             t0 = time.time(); handled = False
@@ -322,9 +351,9 @@ class DialogDriver(threading.Thread):
                     if not ed or not ok:
                         continue                         # some other message box: leave it to the user
                     self.seen.add(d)
-                    U.SendMessageW(ed, WM_SETTEXT, 0, ctypes.c_wchar_p(path))
-                    time.sleep(0.2)
-                    U.SendMessageW(ok, BM_CLICK, 0, None)
+                    if not self._enter(d, ed, ok, path):
+                        self.seen.discard(d)                 # not accepted: try this dialog again
+                        continue
                     self.log(f'  [dialog "{_title(d)}"] <- {path}')
                     self.done.append(path)
                     handled = True
