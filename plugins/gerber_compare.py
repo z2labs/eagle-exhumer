@@ -952,8 +952,32 @@ def compare_drills(he, hk, dx, dy, tol=0.03, dtol=0.02):
                 diameter_differs=dia)
 
 
-def eagle_pours(brd_path, geo):
-    """{layer key: polygon-pour region} from the EAGLE board (signal polygons, outline vertices)."""
+def brd_offset(brd_path, he):
+    """Offset of the EAGLE CAM frame against the .brd frame (older CAM jobs move the board, e.g. to
+    the lower left of the film): vias of the board voted against the EAGLE drill file."""
+    if not brd_path or not he:
+        return (0.0, 0.0), 0
+    import xml.etree.ElementTree as ET
+    b = ET.parse(brd_path).getroot().find('drawing/board')
+    vias = [(float(v.get('x')), float(v.get('y')), float(v.get('drill')), None)
+            for s in b.findall('signals/signal') for v in s.findall('via')]
+    if len(vias) < 3:
+        return (0.0, 0.0), 0
+    r, _ = align(he, vias)
+    if r is None:
+        return (0.0, 0.0), 0
+    dx, dy = r
+    grid = {(round(x, 1), round(y, 1)) for x, y, _, _ in he}
+    hit = sum(any((round(x + dx + ex, 1), round(y + dy + ey, 1)) in grid for ex in (-0.1, 0, 0.1) for ey in (-0.1, 0, 0.1))
+              for x, y, _, _ in vias)
+    if hit < 0.8 * len(vias):                       # not this board / no consistent offset
+        return (0.0, 0.0), 0
+    return (dx, dy), hit
+
+
+def eagle_pours(brd_path, geo, off=(0.0, 0.0)):
+    """{layer key: polygon-pour region} from the EAGLE board (signal polygons, outline vertices),
+    in the frame of the EAGLE manufacturing files (off: brd_offset)."""
     if not brd_path:
         return {}
     import xml.etree.ElementTree as ET
@@ -967,10 +991,16 @@ def eagle_pours(brd_path, geo):
     for s in b.findall('signals/signal'):
         for p in s.findall('polygon'):
             k = key.get(p.get('layer'))
-            pts = [(float(v.get('x')), float(v.get('y'))) for v in p.findall('vertex')]
+            pts = [(float(v.get('x')) + off[0], float(v.get('y')) + off[1]) for v in p.findall('vertex')]
             if k and len(pts) >= 3:
                 out[k].append(geo.poly(pts))
     return {k: geo.union(v) for k, v in out.items()}
+
+
+def _frame(parts, bb):
+    """a difference spanning the whole board = an outline frame"""
+    W, H = bb[2] - bb[0], bb[3] - bb[1]
+    return any(w >= 0.9 * W and h >= 0.9 * H for _, _, _, w, h in parts)
 
 
 def compare(eagle_dir, kicad_dir, brd=None, tol=0.03, geo=None, log=print, prefer=None):
@@ -989,8 +1019,12 @@ def compare(eagle_dir, kicad_dir, brd=None, tol=0.03, geo=None, log=print, prefe
     res['align'] = dict(dx=round(dx, 4), dy=round(dy, 4), votes=votes)
     if he and hk:
         res['drill'] = compare_drills(he, hk, dx, dy)
-    pours = eagle_pours(brd, geo) if brd else {}
+    off, ov = brd_offset(brd, he) if brd else ((0.0, 0.0), 0)
+    if abs(off[0]) > 0.01 or abs(off[1]) > 0.01:
+        notes.append(f'EAGLE CAM frame is offset against the .brd by ({off[0]:.3f}, {off[1]:.3f}) mm ({ov} vias) - pours moved along')
+    pours = eagle_pours(brd, geo, off) if brd else {}
     board_bb = geo.bbox(le['outline'].build(geo)) if 'outline' in le else None
+    band = None
     for k in sorted(set(le) | set(lk)):
         if k.startswith('silk:'):
             continue                                # fonts differ between tools: not compared
@@ -1010,9 +1044,20 @@ def compare(eagle_dir, kicad_dir, brd=None, tol=0.03, geo=None, log=print, prefe
             out = geo.diff(sig, pours[k])
             entry['significant_outside_pours_mm2'] = round(geo.area(out), 3)
             entry['pour_mm2'] = round(geo.area(pours[k]), 1)
-            spots = geo.parts(out)
-        else:
-            spots = geo.parts(sig)
+        se = geo.opening(geo.diff(a, b), tol)       # per side: what only EAGLE has / only KiCad has
+        sk = geo.opening(geo.diff(b, a), tol)
+        if k.startswith('cu:') and k in pours:
+            se, sk = geo.diff(se, pours[k]), geo.diff(sk, pours[k])
+        pe = geo.parts(se)
+        if board_bb and 'outline' in le and k != 'outline' and _frame(pe, board_bb):
+            if band is None:                        # older EAGLE CAM jobs plot the Dimension layer into every layer
+                band = Gerber(le['outline'].path, geo, stroke=0.6).build(geo)
+            se = geo.diff(se, band)
+            pe = geo.parts(se)
+            entry['eagle_plots_outline'] = True
+            notes.append(f'{k}: the EAGLE CAM job plots the board outline into this layer - outline band ignored')
+        spots = [t + ('eagle',) for t in pe] + [t + ('kicad',) for t in geo.parts(sk)]
+        se = sk = None
         if board_bb:                                # copper text / drawings outside the board are routed away
             x0, y0, x1, y1 = board_bb
             inside = [t for t in spots if x0 - 0.5 <= t[1] <= x1 + 0.5 and y0 - 0.5 <= t[2] <= y1 + 0.5]
@@ -1020,8 +1065,8 @@ def compare(eagle_dir, kicad_dir, brd=None, tol=0.03, geo=None, log=print, prefe
             spots = inside
         entry['spots_mm2'] = round(sum(t[0] for t in spots), 3)
         spots.sort(key=lambda t: -t[0])
-        entry['spots'] = [dict(mm2=round(a_, 4), x=round(cx, 3), y=round(cy, 3), w=round(w, 3), h=round(h, 3))
-                          for a_, cx, cy, w, h in spots[:40]]
+        entry['spots'] = [dict(mm2=round(a_, 4), x=round(cx, 3), y=round(cy, 3), w=round(w, 3), h=round(h, 3), only_in=side)
+                          for a_, cx, cy, w, h, side in spots[:40]]
         entry['n_spots'] = len(spots)
         res['layers'][k] = entry
         le[k].geom = lk[k].geom = None
@@ -1055,7 +1100,7 @@ def verdict(res, spot_min=0.05):
                 (fails if k.startswith(('cu:', 'mask:')) else warns).append(f'{k}: only in the {e["only_in"]} files')
             continue
         big = [s for s in e['spots'] if s['mm2'] >= spot_min]
-        where = '; '.join(f"({s['x']:.2f}, {s['y']:.2f}) {s['mm2']:.2f} mm2" for s in big[:5])
+        where = '; '.join(f"({s['x']:.2f}, {s['y']:.2f}) {s['mm2']:.2f} mm2 {s['w']:.1f}x{s['h']:.1f} only {s.get('only_in', '?')}" for s in big[:5])
         if k.startswith(('cu:', 'mask:', 'paste:')) and big:
             what = 'copper outside pours' if k.startswith('cu:') else 'openings'
             fails.append(f"{k}: {len(big)} {what} differ, {sum(s['mm2'] for s in big):.2f} mm2 - {where}")
