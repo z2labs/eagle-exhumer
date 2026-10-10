@@ -1046,16 +1046,15 @@ def compare(eagle_dir, kicad_dir, brd=None, tol=0.03, geo=None, log=print, prefe
             entry['pour_mm2'] = round(geo.area(pours[k]), 1)
         se = geo.opening(geo.diff(a, b), tol)       # per side: what only EAGLE has / only KiCad has
         sk = geo.opening(geo.diff(b, a), tol)
-        if k.startswith('cu:') and k in pours:
-            se, sk = geo.diff(se, pours[k]), geo.diff(sk, pours[k])
-        pe = geo.parts(se)
-        if board_bb and 'outline' in le and k != 'outline' and _frame(pe, board_bb):
+        if board_bb and 'outline' in le and k != 'outline' and _frame(geo.parts(se), board_bb):
             if band is None:                        # older EAGLE CAM jobs plot the Dimension layer into every layer
                 band = Gerber(le['outline'].path, geo, stroke=0.6).build(geo)
             se = geo.diff(se, band)
-            pe = geo.parts(se)
             entry['eagle_plots_outline'] = True
             notes.append(f'{k}: the EAGLE CAM job plots the board outline into this layer - outline band ignored')
+        if k.startswith('cu:') and k in pours:
+            se, sk = geo.diff(se, pours[k]), geo.diff(sk, pours[k])
+        pe = geo.parts(se)
         spots = [t + ('eagle',) for t in pe] + [t + ('kicad',) for t in geo.parts(sk)]
         se = sk = None
         if board_bb:                                # copper text / drawings outside the board are routed away
