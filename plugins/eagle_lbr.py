@@ -110,9 +110,14 @@ def lbr_to_project(lbr_path, out_dir, name=None):
     extra_pk = [p for p in packages if p not in used_pk]
 
     # ---- nets: one per connected pin (a pin may sit on several pads)
+    # supply pins (direction pwr) keep the EAGLE semantics: their net is named after the pin
+    pdir = {(sn, pn.get('name')): pn.get('direction', 'io') for sn, sy in symbols.items() for pn in sy.findall('pin')}
     netname, used_names = {}, set()
     for p in parts:
+        gsym = dict(p['gates'])
         for g, pin, pads in p['connects']:
+            if pdir.get((gsym.get(g), pin)) == 'pwr':
+                netname[(p['ref'], g, pin)] = (pin, pads.split()); continue
             base = f"{p['ref']}_{_safe(pin)}"
             n, i = base, 1
             while n in used_names:
@@ -139,7 +144,7 @@ def lbr_to_project(lbr_path, out_dir, name=None):
         if k % PARTS_PER_SHEET == 0:
             sheet = ET.SubElement(sheets, 'sheet')
             ET.SubElement(sheet, 'plain'); inst = ET.SubElement(sheet, 'instances')
-            ET.SubElement(sheet, 'busses'); nets = ET.SubElement(sheet, 'nets')
+            ET.SubElement(sheet, 'busses'); nets = ET.SubElement(sheet, 'nets'); sheet_nets = {}
             col_x, row_y, row_h, col = 0.0, 0.0, 0.0, 0
         # gates of one part stacked vertically in one column
         y = row_y; w = 0.0
@@ -156,8 +161,10 @@ def lbr_to_project(lbr_path, out_dir, name=None):
                 px, py = gx + _f(pin, 'x'), gy + _f(pin, 'y')
                 ox, oy = _outward(pin.get('rot'))
                 ex, ey = round(px + ox * GRID, 4), round(py + oy * GRID, 4)
-                net = ET.SubElement(nets, 'net', name=netname[key][0], **{'class': '0'})
-                seg = ET.SubElement(net, 'segment')
+                nn = netname[key][0]
+                if nn not in sheet_nets:
+                    sheet_nets[nn] = ET.SubElement(nets, 'net', name=nn, **{'class': '0'})
+                seg = ET.SubElement(sheet_nets[nn], 'segment')
                 ET.SubElement(seg, 'pinref', part=p['ref'], gate=g, pin=pin.get('name'))
                 ET.SubElement(seg, 'wire', x1=f'{px}', y1=f'{py}', x2=f'{ex}', y2=f'{ey}', width='0.1524', layer='91')
                 ET.SubElement(seg, 'label', x=f'{ex}', y=f'{ey}', size='1.27', layer='95')
@@ -200,12 +207,14 @@ def lbr_to_project(lbr_path, out_dir, name=None):
         x += w + 5.0; row_h = max(row_h, h); maxx = max(maxx, x); n_col += 1
         if n_col >= 12:
             x, y, row_h, n_col = 0.0, y + row_h + 5.0, 0.0, 0
+    signal = {}
     for (ref, g, pin), (net, pads) in netname.items():
         if ref not in pos:
             continue
-        s = ET.SubElement(sigs, 'signal', name=net)
+        if net not in signal:
+            signal[net] = ET.SubElement(sigs, 'signal', name=net)
         for pd in pads:
-            ET.SubElement(s, 'contactref', element=ref, pad=pd)
+            ET.SubElement(signal[net], 'contactref', element=ref, pad=pd)
     H = y + row_h + 2 * X0; W = maxx + 2 * X0
     for x1, y1, x2, y2 in ((0, 0, W, 0), (W, 0, W, -H), (W, -H, 0, -H), (0, -H, 0, 0)):
         ET.SubElement(plain, 'wire', x1=f'{x1}', y1=f'{y1}', x2=f'{x2}', y2=f'{y2}', width='0', layer='20')

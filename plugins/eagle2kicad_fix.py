@@ -2701,17 +2701,25 @@ def selftest(d, proj, cli, esch, ebrd):
         used.add(id(fp))
         results.append(('F1 pad numbers swapped (copper identical)', 'padpos',
                         f"{prop_val(fp, 'Reference')}.{b[1]}<->{a[1]}"))
-    # F2: swap only the NETS of two pads of another part -> short + open
-    f2 = None
-    for fp in fps:
-        if id(fp) in used: continue
-        ps = smd_pads(fp)
-        for i in range(len(ps)):
-            for j in range(i + 1, len(ps)):
-                if sx_dump(kid(ps[i], 'net')) != sx_dump(kid(ps[j], 'net')):
-                    f2 = (fp, ps[i], ps[j]); break
+    # F2: swap only the NETS of two pads of another part -> short + open. Both nets must reach other
+    # pads too, or the swap is invisible to a topology compare (library projects: one net per pin);
+    # without such a pair the swap is detected by net NAME (renames above the unfaulted baseline).
+    f2 = None; f2_named = False
+    netpads = Counter(sx_dump(kid(p_, 'net')) for fp in fps for p_ in smd_pads(fp))
+    for need in (2, 1):
+        for fp in fps:
+            if id(fp) in used: continue
+            ps = smd_pads(fp)
+            for i in range(len(ps)):
+                for j in range(i + 1, len(ps)):
+                    na, nb = sx_dump(kid(ps[i], 'net')), sx_dump(kid(ps[j], 'net'))
+                    if na != nb and netpads[na] >= need and netpads[nb] >= need:
+                        f2 = (fp, ps[i], ps[j]); break
+                if f2: break
             if f2: break
-        if f2: break
+        if f2:
+            f2_named = need == 1
+            break
     if f2:
         fp, a, b = f2
         ia, ib = a.index(kid(a, 'net')), b.index(kid(b, 'net'))
@@ -2786,6 +2794,8 @@ def selftest(d, proj, cli, esch, ebrd):
     VIEW = CliView(tmp, proj)
     try:
         truth_b = eagle_brd_truth(ebrd)
+        if f2_named:
+            compare_nets(truth_b, kicad_pcb_padnets(read_sx(os.path.join(d, proj + '.kicad_pcb'))), 'selftest pcb base')
         compare_nets(truth_b, kicad_pcb_padnets(read_sx(pcb)), 'selftest pcb')
         verify_geometry(pcb, ebrd)
         if cli and esch:
@@ -2799,7 +2809,8 @@ def selftest(d, proj, cli, esch, ebrd):
     cmp = {lab: (m, s_, a_) for lab, m, s_, a_ in COMPARE_LOG}
     caught = {
         'padpos': g.get('padpos', 0) > 0,
-        'pcbnet': sum(cmp.get('selftest pcb', (0, 0, 0))[:2]) > 0,
+        'pcbnet': sum(cmp.get('selftest pcb', (0, 0, 0))[:2]) > 0 or (f2_named and
+                  LAST_CMP.get('selftest pcb', {}).get('renamed', 0) > LAST_CMP.get('selftest pcb base', {}).get('renamed', 0)),
         'moved': g.get('moved', 0) > 0,
         'val': g.get('val', 0) > 0,
         'via': g.get('via', 0) > 0,
