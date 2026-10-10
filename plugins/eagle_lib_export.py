@@ -49,6 +49,11 @@ def eagle_devices(lbr_path):
     return out, pk
 
 
+def kicad_escape(name):
+    """KiCad's EAGLE importer writes '"' in symbol names as {dblquote} ('/' stays as it is)"""
+    return name.replace('"', '{dblquote}')
+
+
 def _set_prop(sym, name, value, hide=True):
     p = prop(sym, name)
     if p is not None:
@@ -94,7 +99,7 @@ def export_symbols(sym_path, devices, lib, out_dir, rep):
     by_ds = {}
     missing, badpins = [], []
     for key, dv in devices.items():
-        s = syms.get(key)
+        s = syms.get(key) or syms.get(kicad_escape(key))
         if s is None:
             missing.append(key); continue
         s = copy.deepcopy(s)
