@@ -839,7 +839,7 @@ def find_mfg(eagle_file):
 
 def collect(dirpath, geo):
     """{layer key: Gerber}, [holes] from a folder (sub-folders included) or a .zip"""
-    layers, holes, notes = {}, [], []
+    layers, holes, notes, dfiles = {}, [], [], []
     for p in _unpack(dirpath):
         if not os.path.isfile(p):
             continue
@@ -848,7 +848,7 @@ def collect(dirpath, geo):
             continue
         head = open(p, encoding='latin-1').read(400)
         if ext in ('.xnc', '.xln', '.drl', '.drd', '.exc', '.txt') and ('M48' in head or head.lstrip().startswith(('T', '%', ';'))):
-            holes += read_excellon(p); notes.append(f'drill: {_display(p)}'); continue
+            dfiles.append((p, read_excellon(p))); notes.append(f'drill: {_display(p)}'); continue
         if '%FS' not in head and 'G04' not in head and '%MO' not in head:
             continue
         g = Gerber(p, geo)
@@ -865,7 +865,29 @@ def collect(dirpath, geo):
         for n in ls:
             g = layers.pop(f'cu:L{n}')
             layers['cu:top' if n == 1 else 'cu:bot' if n == ls[-1] else f'cu:in{n - 1}'] = g
+    ref = layers.get('outline') or layers.get('cu:top') or layers.get('cu:bot')
+    seen = set()
+    for p, hs in dfiles:
+        if ref is not None and ref.bounds and hs:
+            hs, f = _fit_drill_scale(hs, ref.bounds)
+            if f != 1:
+                notes.append(f'drill {os.path.basename(p)}: coordinate format not declared - scaled x{f:g} to fit the layers')
+        for h in hs:                                # the same holes in two drill files (old + new CAM job) once
+            k = (round(h[0], 2), round(h[1], 2), round(h[2], 3))
+            if k not in seen:
+                seen.add(k); holes.append(h)
     return layers, holes, notes
+
+
+def _fit_drill_scale(hs, b, m=1.0):
+    """Excellon files without a format header (old EAGLE: M72 only) are ambiguous in the number of
+    decimals: pick the coordinate scale that puts the holes inside the Gerber extent of the same set."""
+    def inside(f):
+        return sum(b[0] - m <= h[0] * f <= b[2] + m and b[1] - m <= h[1] * f <= b[3] + m for h in hs)
+    best = max((1, 0.1, 10, 0.01, 100), key=inside)
+    if inside(best) <= inside(1):
+        return hs, 1
+    return [(x * best, y * best, d, None if sl is None else (sl[0] * best, sl[1] * best)) for x, y, d, sl in hs], best
 
 
 # --------------------------------------------------------------------------- alignment + comparison
