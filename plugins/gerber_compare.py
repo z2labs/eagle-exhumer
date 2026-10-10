@@ -74,6 +74,9 @@ class ShapelyGeo:
     def empty(self):
         return self.Polygon()
 
+    def bbox(self, g):
+        return None if g.is_empty else g.bounds
+
 
 class KicadGeo:
     """SHAPE_POLY_SET from KiCad's pcbnew module, internal units nm."""
@@ -89,11 +92,16 @@ class KicadGeo:
         ps.NewOutline()
         for x, y in pts:
             ps.Append(int(round(x * self.S)), int(round(y * self.S)))
-        ps.Simplify()
-        return ps
+        return ps                                   # unions Simplify() once for the whole set
 
     def empty(self):
         return self.p.SHAPE_POLY_SET()
+
+    def bbox(self, g):
+        if g.OutlineCount() == 0:
+            return None
+        b = g.BBox()
+        return (b.GetX() / self.S, b.GetY() / self.S, b.GetRight() / self.S, b.GetBottom() / self.S)
 
     def _copy(self, a):
         c = self.p.SHAPE_POLY_SET(); c.Append(a); return c
@@ -568,6 +576,13 @@ def layer_key(path, function=''):
                 return f'{v}:' + ('top' if 'top' in f else 'bot') if v != 'outline' else 'outline'
     stem = os.path.splitext(n)[0]
     table = [
+        (r'(^|[-_.])(legend_top|silkscreen_top)$', 'silk:top'),
+        (r'(^|[-_.])(legend_bot(tom)?|silkscreen_bot(tom)?)$', 'silk:bot'),
+        (r'(^|[-_.])(soldermask_top)$', 'mask:top'),
+        (r'(^|[-_.])(soldermask_bot(tom)?)$', 'mask:bot'),
+        (r'(^|[-_.])(paste_top|solderpaste_top)$', 'paste:top'),
+        (r'(^|[-_.])(paste_bot(tom)?|solderpaste_bot(tom)?)$', 'paste:bot'),
+        (r'(^|[-_.])copper_l(\d+)$', 'cu:L'),
         (r'(^|[-_.])(f[._]cu|top|cmp|copper_top|toplayer)$', 'cu:top'),
         (r'(^|[-_.])(b[._]cu|bot|bottom|sol|copper_bottom|bottomlayer|bop)$', 'cu:bot'),
         (r'(^|[-_.])(in(\d+)[._]cu|ln(\d+)_cu|inner(\d+)|l(\d+)_cu|route(\d+))$', 'cu:in'),
@@ -577,7 +592,7 @@ def layer_key(path, function=''):
         (r'(^|[-_.])(b[._]paste|bot_paste|crs|bcream|bottompaste)$', 'paste:bot'),
         (r'(^|[-_.])(f[._]silks(creen)?|top_silk|plc|tsilk|topsilk)$', 'silk:top'),
         (r'(^|[-_.])(b[._]silks(creen)?|bot_silk|pls|bsilk|bottomsilk)$', 'silk:bot'),
-        (r'(^|[-_.])(edge[._]cuts|dimension|outline|gko|board)$', 'outline'),
+        (r'(^|[-_.])(edge[._]cuts|dimension|outline|gko|board|profile(_np|_p)?)$', 'outline'),
     ]
     for rx, key in table:
         m = re.search(rx, stem)
@@ -585,6 +600,8 @@ def layer_key(path, function=''):
             if key == 'cu:in':
                 num = next(g for g in m.groups()[2:] if g)
                 return f'cu:in{int(num)}'
+            if key == 'cu:L':                      # EAGLE 9 CAM: copper_l1 .. copper_lN, resolved in collect()
+                return f'cu:L{int(m.group(2))}'
             return key
     return None
 
@@ -631,6 +648,50 @@ def _display(p):
     return b[5:] if re.match(r'\d{4}_', b) else b
 
 
+MFG_NAME = re.compile(r'(mfg|cam|gerber|fab|production|manufactur|fertigung|gyart)', re.I)
+
+
+def looks_like_mfg(path):
+    """True if a folder / .zip holds at least one Gerber file (cheap: names + first bytes)."""
+    import zipfile
+    try:
+        if os.path.isfile(path) and path.lower().endswith('.zip'):
+            with zipfile.ZipFile(path) as zf:
+                return any(re.search(r'\.(gbr|ger|gtl|gbl|gts|cmp|sol|g\d)$', n, re.I) for n in zf.namelist())
+        for root, _, names in os.walk(path):
+            for n in names:
+                p = os.path.join(root, n)
+                if re.search(r'\.(gbr|ger|gtl|gbl|gts|cmp|sol)$', n, re.I):
+                    return True
+                if n.lower().endswith('.zip') and looks_like_mfg(p):
+                    return True
+            if root.count(os.sep) - path.count(os.sep) > 3:
+                break
+    except Exception:
+        return False
+    return False
+
+
+def find_mfg(eagle_file):
+    """Manufacturing files next to the EAGLE design (same folder, its parent, or a CAM/MFG/Gerber
+    sub-folder / zip of either): the newest candidate, or None."""
+    base = os.path.dirname(os.path.abspath(eagle_file))
+    stem = os.path.splitext(os.path.basename(eagle_file))[0].lower()
+    cands = []
+    for root in (base, os.path.dirname(base)):
+        try:
+            names = os.listdir(root)
+        except OSError:
+            continue
+        for n in names:
+            p = os.path.join(root, n)
+            if (os.path.isdir(p) and MFG_NAME.search(n)) or (n.lower().endswith('.zip') and (MFG_NAME.search(n) or stem in n.lower())):
+                if looks_like_mfg(p):
+                    cands.append(p)
+    cands.sort(key=lambda p: (stem in os.path.basename(p).lower(), os.path.getmtime(p)), reverse=True)
+    return cands[0] if cands else None
+
+
 def collect(dirpath, geo):
     """{layer key: Gerber}, [holes] from a folder (sub-folders included) or a .zip"""
     layers, holes, notes = {}, [], []
@@ -641,7 +702,7 @@ def collect(dirpath, geo):
         if ext in ('.pdf', '.png', '.jpg', '.zip', '.rar', '.7z', '.xlsx', '.csv', '.pos', '.gbrjob', '.json', '.html'):
             continue
         head = open(p, encoding='latin-1').read(400)
-        if ext in ('.xnc', '.drl', '.drd', '.exc', '.txt') and ('M48' in head or head.lstrip().startswith(('T', '%', ';'))):
+        if ext in ('.xnc', '.xln', '.drl', '.drd', '.exc', '.txt') and ('M48' in head or head.lstrip().startswith(('T', '%', ';'))):
             holes += read_excellon(p); notes.append(f'drill: {_display(p)}'); continue
         if '%FS' not in head and 'G04' not in head and '%MO' not in head:
             continue
@@ -654,6 +715,11 @@ def collect(dirpath, geo):
         if k in layers:
             notes.append(f'two files for {k}: {os.path.basename(p)} ignored'); continue
         layers[k] = g
+    ls = sorted(int(k[4:]) for k in layers if k.startswith('cu:L'))
+    if ls:                                          # copper_l1 = top, highest = bottom, the rest inner
+        for n in ls:
+            g = layers.pop(f'cu:L{n}')
+            layers['cu:top' if n == 1 else 'cu:bot' if n == ls[-1] else f'cu:in{n - 1}'] = g
     return layers, holes, notes
 
 
@@ -725,8 +791,11 @@ def eagle_pours(brd_path, geo):
         return {}
     import xml.etree.ElementTree as ET
     b = ET.parse(brd_path).getroot().find('drawing/board')
+    # inner layers in stack order: the n-th used EAGLE inner layer (2..15) is KiCad In<n>
+    used = sorted({int(e.get('layer')) for e in b.iter() if e.get('layer', '').isdigit() and 2 <= int(e.get('layer')) <= 15
+                   and e.tag in ('wire', 'polygon', 'smd', 'rectangle', 'circle')})
     key = {'1': 'cu:top', '16': 'cu:bot'}
-    key.update({str(i): f'cu:in{i - 1}' for i in range(2, 16)})
+    key.update({str(l): f'cu:in{i + 1}' for i, l in enumerate(used)})
     out = defaultdict(list)
     for s in b.findall('signals/signal'):
         for p in s.findall('polygon'):
@@ -750,7 +819,10 @@ def compare(eagle_dir, kicad_dir, brd=None, tol=0.03, geo=None, log=print):
     if he and hk:
         res['drill'] = compare_drills(he, hk, dx, dy)
     pours = eagle_pours(brd, geo) if brd else {}
+    board_bb = geo.bbox(le['outline'].geom) if 'outline' in le else None
     for k in sorted(set(le) | set(lk)):
+        if k.startswith('silk:'):
+            continue                                # fonts differ between tools: not compared
         if k not in le or k not in lk:
             res['layers'][k] = dict(only_in='eagle' if k in le else 'kicad')
             continue
@@ -766,9 +838,16 @@ def compare(eagle_dir, kicad_dir, brd=None, tol=0.03, geo=None, log=print):
             entry['significant_in_pours_mm2'] = round(geo.area(in_pour), 3)
             out = geo.diff(sig, pours[k])
             entry['significant_outside_pours_mm2'] = round(geo.area(out), 3)
+            entry['pour_mm2'] = round(geo.area(pours[k]), 1)
             spots = geo.parts(out)
         else:
             spots = geo.parts(sig)
+        if board_bb:                                # copper text / drawings outside the board are routed away
+            x0, y0, x1, y1 = board_bb
+            inside = [t for t in spots if x0 - 0.5 <= t[1] <= x1 + 0.5 and y0 - 0.5 <= t[2] <= y1 + 0.5]
+            entry['outside_board_mm2'] = round(sum(t[0] for t in spots if t not in inside), 3)
+            spots = inside
+        entry['spots_mm2'] = round(sum(t[0] for t in spots), 3)
         spots.sort(key=lambda t: -t[0])
         entry['spots'] = [dict(mm2=round(a_, 4), x=round(cx, 3), y=round(cy, 3), w=round(w, 3), h=round(h, 3))
                           for a_, cx, cy, w, h in spots[:40]]
@@ -777,7 +856,41 @@ def compare(eagle_dir, kicad_dir, brd=None, tol=0.03, geo=None, log=print):
         log(f"  {k:10s} eagle {ae:10.2f}  kicad {ak:10.2f}  xor {entry['xor_mm2']:9.3f}  significant {entry['significant_mm2']:8.3f} mm2"
             + (f"  (outside pours {entry['significant_outside_pours_mm2']:.3f})" if 'significant_outside_pours_mm2' in entry else '')
             + f"  spots {len(spots)}")
+    res['verdict'] = verdict(res)
     return res
+
+
+def verdict(res, spot_min=0.05):
+    """(fails, warnings, infos). Copper outside pours inside the board, mask, paste and drill must be
+    identical; pours and the outline are reported; copper outside the board is information."""
+    fails, warns, infos = [], [], []
+    d = res.get('drill')
+    if d:
+        if d['eagle'] and d['matched'] < 0.9 * d['eagle']:
+            return [], [f"manufacturing reference does not match this board ({d['matched']} of {d['eagle']} drill holes "
+                        f"found) - other revision? Gerber comparison skipped"], []
+        if d['missing_in_kicad'] or d['extra_in_kicad'] or d['diameter_differs']:
+            fails.append(f"drill: {len(d['missing_in_kicad'])} missing, {len(d['extra_in_kicad'])} extra, "
+                         f"{len(d['diameter_differs'])} other diameter (of {d['eagle']})")
+    else:
+        warns.append('drill files missing on one side - drill not compared')
+    for k, e in sorted(res['layers'].items()):
+        if 'only_in' in e:
+            (fails if k.startswith(('cu:', 'mask:')) else warns).append(f'{k}: only in the {e["only_in"]} files')
+            continue
+        big = [s for s in e['spots'] if s['mm2'] >= spot_min]
+        where = '; '.join(f"({s['x']:.2f}, {s['y']:.2f}) {s['mm2']:.2f} mm2" for s in big[:5])
+        if k.startswith(('cu:', 'mask:', 'paste:')) and big:
+            what = 'copper outside pours' if k.startswith('cu:') else 'openings'
+            fails.append(f"{k}: {len(big)} {what} differ, {sum(s['mm2'] for s in big):.2f} mm2 - {where}")
+        if k == 'outline' and big:
+            warns.append(f"outline: {len(big)} differences, {sum(s['mm2'] for s in big):.2f} mm2 (0.1 mm line) - {where}")
+        if e.get('significant_in_pours_mm2'):
+            pct = 100 * e['significant_in_pours_mm2'] / max(e.get('pour_mm2') or 1, 1)
+            warns.append(f"{k}: polygon pour fill differs by {e['significant_in_pours_mm2']:.1f} mm2 ({pct:.1f} % of the pour area)")
+        if e.get('outside_board_mm2'):
+            infos.append(f"{k}: {e['outside_board_mm2']:.2f} mm2 differ outside the board outline (text / drawings, not manufactured)")
+    return fails, warns, infos
 
 
 def main():
@@ -791,6 +904,11 @@ def main():
         print(f"  drill: eagle {d['eagle']}, kicad {d['kicad']}, matched {d['matched']}, missing in KiCad {len(d['missing_in_kicad'])}, "
               f"extra in KiCad {len(d['extra_in_kicad'])}, diameter differs {len(d['diameter_differs'])}")
     print('  align', r['align'], '| notes:', '; '.join(r['notes']))
+    f, w, i = r['verdict']
+    print('  MFG verdict:', 'MATCH' if not f else 'DIFFERS')
+    for t, l in (('FAIL', f), ('WARN', w), ('info', i)):
+        for x in l:
+            print(f'    {t:4s} {x}')
     if a.json:
         json.dump(r, open(a.json, 'w'), indent=1)
 

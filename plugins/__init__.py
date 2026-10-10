@@ -527,6 +527,8 @@ class ImportJob:
         if meta:
             cmd += ['--import-meta', _json.dumps(meta)]
         cmd += ['--layers', 'ask']                 # decisions the fixer cannot take alone come back as @@ASK
+        if getattr(self, 'mfg', None):
+            cmd += ['--mfg', self.mfg]
         flags = 0x08000000 if os.name == 'nt' else 0
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                      encoding='utf-8', errors='replace', creationflags=flags, cwd=self.target)
@@ -706,6 +708,42 @@ class FixJob(ImportJob):
 
 # ------------------------------------------------------------------ plugin
 
+def _ask_mfg(src):
+    """The EAGLE manufacturing files (Gerber + drill, folder or .zip) the board was made from: the
+    converted board is compared with them - an independent second check. Strongly recommended,
+    not required. Returns a path or None."""
+    try:
+        from gerber_compare import find_mfg
+        found = find_mfg(src)
+    except Exception:
+        found = None
+    text = ('Do you have the Gerber + drill files this board was manufactured from (a folder or the .zip '
+            'sent to the fab)?\n\nStrongly recommended: the converted KiCad board is exported and compared '
+            'with them layer by layer - copper, solder mask, paste, drill. It is the closest check to '
+            '"the fab would build the same board".')
+    if found:
+        text += f'\n\nFound next to the EAGLE file:\n{found}'
+    dlg = wx.MessageDialog(None, text, 'Eagle Exhumer - manufacturing files (recommended)',
+                           wx.YES_NO | wx.CANCEL | wx.ICON_QUESTION)
+    dlg.SetYesNoCancelLabels('Use these' if found else 'Choose a .zip...', 'Choose a folder...' if not found
+                             else 'Choose others...', 'Skip')
+    ans = dlg.ShowModal(); dlg.Destroy()
+    if ans == wx.ID_CANCEL:
+        return None
+    if ans == wx.ID_YES and found:
+        return found
+    if ans == wx.ID_YES or found:
+        fd = wx.FileDialog(None, 'Manufacturing files (.zip) - Cancel to pick a folder instead',
+                           defaultDir=os.path.dirname(src), wildcard='Zip (*.zip)|*.zip', style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST)
+        if fd.ShowModal() == wx.ID_OK:
+            p = fd.GetPath(); fd.Destroy(); return p
+        fd.Destroy()
+    dd = wx.DirDialog(None, 'Folder with the Gerber + drill files', defaultPath=os.path.dirname(src))
+    p = dd.GetPath() if dd.ShowModal() == wx.ID_OK else None
+    dd.Destroy()
+    return p
+
+
 class Eagle2KiCadImport(pcbnew.ActionPlugin):
     def defaults(self):
         self.name = 'Eagle Exhumer: Eagle -> KiCad import + quality control'
@@ -770,6 +808,7 @@ class Eagle2KiCadImport(pcbnew.ActionPlugin):
                 return
             job = FixJob(mgr, src, pro)
             job.other_project = other_project
+            job.mfg = _ask_mfg(src)
             wx.CallAfter(job.start)
             return
         dlg = wx.FileDialog(None, 'Eagle schematic / board (.sch, .brd)',
@@ -815,6 +854,7 @@ class Eagle2KiCadImport(pcbnew.ActionPlugin):
             target = base if (os.path.isdir(base) and not os.listdir(base)) else free(base)
         os.makedirs(target, exist_ok=True)
         job = ImportJob(mgr, mid, src, target)
+        job.mfg = _ask_mfg(src)
         wx.CallAfter(job.start)        # leave the PCB frame's event handler first: KiCad closes it
 
 

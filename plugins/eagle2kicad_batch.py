@@ -266,6 +266,14 @@ def run_fix(target, sch, brd, meta=None):
             dst = os.path.join(src_dir, os.path.basename(f)); shutil.copy2(f, dst); args += [opt, dst]
     if meta:
         args += ['--import-meta', json.dumps(meta)]
+    try:                                            # EAGLE manufacturing files next to the design -> Gerber check
+        from gerber_compare import find_mfg
+        mfg = find_mfg(brd or sch)
+    except Exception:
+        mfg = None
+    if mfg:
+        args += ['--mfg', mfg]
+        print(f'    manufacturing files: {mfg}')
     r = subprocess.run([sys.executable, '-u', os.path.join(HERE, 'eagle2kicad_fix.py'), target] + args,
                        capture_output=True, text=True, encoding='utf-8', errors='replace')
     with open(os.path.join(target, 'eaglefix_console.log'), 'w', encoding='utf-8') as f:

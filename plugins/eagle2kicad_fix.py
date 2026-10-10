@@ -1802,6 +1802,34 @@ def ask_user(kind, title, text, options, default):
     return a
 
 
+def untent_large_vias(pcb_path, ebrd, dry):
+    """EAGLE leaves vias with a drill larger than the design rule 'mlViaStopLimit' open in the solder
+    mask (stop mask = via diameter); KiCad tents every via by default. Large grounded vias are often
+    screw / mounting holes whose exposed ring makes the chassis contact - tented, the contact is gone
+    (found by the Gerber comparison: 20 such vias on one 8-layer board). Those vias get no tenting."""
+    R.h('PCB: vias EAGLE leaves open in the solder mask')
+    try:
+        import pcbnew
+        root = eagle_root(ebrd)
+        lim = None
+        for prm in root.iter('param'):
+            if prm.get('name') == 'mlViaStopLimit':
+                lim = _unit(prm.get('value'))
+        if lim is None:
+            lim = 100 * 0.0254                          # EAGLE default 100 mil
+        board = pcbnew.LoadBoard(pcb_path)
+        hit = [v for v in board.GetTracks() if v.GetClass() == 'PCB_VIA' and v.GetDrillValue() / 1e6 > lim + 1e-6]
+        R.p(f'EAGLE via stop limit {lim:.3f} mm: {len(hit)} via(s) with a larger drill get a solder-mask opening'
+            + (f" ({', '.join(sorted({f'{v.GetDrillValue() / 1e6:g} mm' for v in hit}))})" if hit else ''))
+        if hit and not dry:
+            for v in hit:
+                v.SetFrontTentingMode(pcbnew.TENTING_MODE_NOT_TENTED)
+                v.SetBackTentingMode(pcbnew.TENTING_MODE_NOT_TENTED)
+            pcbnew.SaveBoard(pcb_path, board)
+    except Exception as ex:
+        R.p(f'via tenting step failed ({ex}) - left as imported')
+
+
 def trim_empty_inner_layers(pcb_path, ebrd, dry):
     """KiCad's Eagle importer sizes the copper stack from the Eagle design-rule 'layerSetup', which
     may declare more layers than the board uses. The result is a 4-layer KiCad project of a 2-layer
@@ -2439,6 +2467,56 @@ def verify_sch_values(esch, sheets):
         f'{n_missing} missing' + ((': ' + ', '.join(bad[:10])) if bad else ''))
 
 
+MFG = {}            # manufacturing-file comparison (Gerber / Excellon vs the EAGLE CAM output)
+
+
+def mfg_check(d, pcb, ref, ebrd, cli):
+    """Export Gerbers + drill of the converted board (zones filled, on a temporary copy) and compare
+    them with the manufacturing files made by the EAGLE CAM (folder or .zip)."""
+    R.h('MANUFACTURING FILES: KiCad Gerbers vs the EAGLE manufacturing files')
+    import shutil, tempfile
+    tmp = tempfile.mkdtemp(prefix='exhumer_gerb_')
+    filled = os.path.join(d, '_mfg_filled.kicad_pcb')
+    try:
+        import pcbnew
+        import gerber_compare as GC
+        b = pcbnew.LoadBoard(pcb)
+        pcbnew.ZONE_FILLER(b).Fill(b.Zones())
+        pcbnew.SaveBoard(filled, b)
+        n = b.GetCopperLayerCount()
+        cu = ['F.Cu'] + [f'In{i}.Cu' for i in range(1, n - 1)] + ['B.Cu']
+        rc1, t1 = run([cli, 'pcb', 'export', 'gerbers', '--output', tmp + os.sep, '--layers',
+                       ','.join(cu + ['F.Mask', 'B.Mask', 'F.Paste', 'B.Paste', 'Edge.Cuts']), '--no-protel-ext', filled])
+        rc2, t2 = run([cli, 'pcb', 'export', 'drill', '--output', tmp + os.sep, '--format', 'excellon',
+                       '--excellon-units', 'mm', '--excellon-separate-th', filled])
+        if rc1 or rc2:
+            raise RuntimeError(f'kicad-cli export failed: {(t1 + t2).strip()[:200]}')
+        R.p(f'reference: {ref}')
+        r = GC.compare(ref, tmp, ebrd, log=lambda t: R.p(t.strip()))
+        fails, warns, infos = r['verdict']
+        dd = r.get('drill') or {}
+        R.p(f"drill: EAGLE {dd.get('eagle')}, KiCad {dd.get('kicad')}, matched {dd.get('matched')}; "
+            f"alignment dx {r['align']['dx']} dy {r['align']['dy']} mm ({r['align']['votes']} hole pairs)")
+        for t, l in (('FAIL', fails), ('WARN', warns), ('info', infos)):
+            for x in l:
+                R.p(f'{t}  {x}')
+        if not fails:
+            R.p('**MATCH** - copper (outside pours), solder mask, paste, drill identical to the EAGLE manufacturing files')
+        MFG.update(evaluated=not any('does not match this board' in w for w in warns), fails=fails, warnings=warns,
+                   infos=infos, layers={k: {kk: vv for kk, vv in v.items() if kk != 'spots'} for k, v in r['layers'].items()},
+                   drill={k: (len(v) if isinstance(v, list) else v) for k, v in dd.items()}, align=r['align'])
+    except Exception as ex:
+        R.p(f'manufacturing-file comparison failed: {ex}')
+        MFG.update(evaluated=False, fails=[], warnings=[f'comparison failed: {ex}'], infos=[])
+    finally:
+        for f in glob.glob(os.path.join(d, '_mfg_filled.*')):
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def qc_verdict(selftest_ok=None, geom=None):
     """Strict quality-control verdict: anything that is not identical to the Eagle source is a FAIL."""
     R.h('QC VERDICT (strict)')
@@ -2462,12 +2540,16 @@ def qc_verdict(selftest_ok=None, geom=None):
         fails.append('reference collision: ' + ', '.join(f'{n}/{kref(n)}' for n in CLASH))
     if selftest_ok is False:
         fails.append('SELFTEST FAILED - the verifier itself is not trustworthy')
+    for f in MFG.get('fails') or []:
+        fails.append('manufacturing files: ' + f)
     if fails:
         R.p('**FAIL** - ' + str(len(fails)) + ' finding(s):')
         for f in fails:
             R.p('  ' + f)
     else:
-        R.p('**PASS** - netlists, pads, geometry, values identical to the Eagle source; selftest passed')
+        R.p('**PASS** - netlists, pads, geometry, values identical to the Eagle source; selftest passed'
+            + ('; Gerbers match the EAGLE manufacturing files' if MFG.get('evaluated') else
+               '; no EAGLE manufacturing files given (recommended: --mfg <Gerber folder or zip>)'))
     return fails
 
 
@@ -2528,7 +2610,7 @@ def write_metrics(d, proj, esch, ebrd, fails, selftest_ok, mode):
         'qc': 'PASS' if not fails else 'FAIL', 'qc_findings': fails,
         'selftest': selftest_ok, 'metrics': METRICS, 'warnings': dict(WARNINGS),
         'timing_s': dict(TIMING), 'total_s': round(time.time() - T_START, 1),
-        'import': IMPORT_META,
+        'import': IMPORT_META, 'mfg': MFG or None,
     }
     try:
         with open(os.path.join(d, 'eaglefix_metrics.json'), 'w', encoding='utf-8') as f:
@@ -2760,6 +2842,8 @@ def main():
     ap.add_argument('--refix', action='store_true',
                     help='run the fix steps again on a project that was already fixed (normally: verify only)')
     ap.add_argument('--import-meta', help='JSON with how/when the KiCad import was made (recorded in the metrics)')
+    ap.add_argument('--mfg', help='EAGLE manufacturing files (Gerber + Excellon, folder or .zip): the converted '
+                                  'board is exported and compared with them (strongly recommended)')
     ap.add_argument('--layers', choices=('auto', 'ask', 'keep', 'trim'), default='auto',
                     help='empty inner copper layers of a board whose Eagle source uses none: auto = remove, '
                          'ask = ask on stdin (@@ASK protocol, used by the plugin GUI), keep = leave, trim = remove')
@@ -2873,6 +2957,9 @@ def main():
         if a.selftest and has_pcb and ebrd:
             progress(40, 'Quality control: self-check')
         st = selftest(d, proj, cli, esch, ebrd) if (a.selftest and has_pcb and ebrd) else None
+        if a.mfg and has_pcb and cli:
+            progress(46, 'Manufacturing files: Gerber comparison')
+            mfg_check(d, pcb, a.mfg, ebrd, cli)
         progress(50, 'Writing the report')
         if has_pcb:
             try:
@@ -2912,6 +2999,7 @@ def main():
         promote_fp_edge_cuts(pcb, a.dry_run)          # first: milling is classified against the outline
         if ebrd:
             trim_empty_inner_layers(pcb, ebrd, a.dry_run)
+            untent_large_vias(pcb, ebrd, a.dry_run)
             add_milling(pcb, ebrd, a.dry_run)
         assign_orphan_pads(pcb, a.dry_run)
         nicks = Counter()
@@ -2956,6 +3044,9 @@ def main():
     if (a.selftest or not a.dry_run) and has_pcb and ebrd:
         progress(63, 'Quality control: self-check')
         st = selftest(d, proj, cli, esch, ebrd)
+    if a.mfg and has_pcb and cli and not a.dry_run:
+        progress(66, 'Manufacturing files: Gerber comparison')
+        mfg_check(d, pcb, a.mfg, ebrd, cli)
     if has_pcb and not a.dry_run:
         try:
             check_3d_models(pcb)
