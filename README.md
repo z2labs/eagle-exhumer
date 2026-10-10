@@ -10,6 +10,8 @@ EAGLE support has ended, and many working boards exist only as EAGLE `.sch`/`.br
 
 Eagle Exhumer runs KiCad's own importer, repairs the importer defects listed below, and then runs a strong quality control against the original EAGLE files, ending in a strict PASS / FAIL verdict and a report.
 
+**Old binary EAGLE files (EAGLE 4.x / 5.x) work too.** KiCad 10 reads only the EAGLE 6+ XML format. Eagle Exhumer converts binary `.sch`/`.brd` files to EAGLE XML first, checks that the converted schematic and board describe the same netlist, and then continues as usual. The original binary files and the converted XML are kept in the project's `eagle_source` folder. The format is documented in [docs/eagle-binary-format.md](docs/eagle-binary-format.md).
+
 > Status: **0.9 testing**. KiCad 10.0. One-click import: Windows. Fix + check of an already imported project: all platforms (Linux/macOS experimental, untested).
 
 ## What the fixer repairs
@@ -88,6 +90,11 @@ KiCad 10.0.6 native import vs. after Eagle Exhumer, 18 batch designs (full re-ru
 
 All 18 pass the quality control with a 6/6 self-check. Found after that run and fixed in 0.9.8: two of the 18 (iMX233-OLinuXino-Micro Rev C/D, 2-layer boards with a 4-layer EAGLE rule set) had been imported as 4-layer KiCad boards with empty inner layers - the quality control had no layer-count item. It has one now (defect #15), and the corpus passes 18/18 with it. 0.9.10 (fixes from the first external test, a 21-sheet, 8-layer design) passes 18/18 too, with a 6/6 self-check. The shorting count is a range because KiCad's DRC reports the same printed-jumper contacts sometimes as one pad–track pair, sometimes as several track–track pairs; the locations are identical from run to run. The remaining ERC errors are 1–3 `power_pin_not_driven` / `pin_to_pin` items per board where the schematic has no explicit power source (a PWR_FLAG decision for a human; the count varies by ±1 between runs). Remaining DRC items are properties of the original EAGLE designs (e.g. clearance values the original violates, printed jumpers), which the conversion carries over rather than redesigning.
 
+**Binary EAGLE converter:** all 227 binary files of the Olimex OLINUXINO repository (EAGLE 4.16: 113 boards, 113 schematics, 1 library) convert. Checks against EAGLE's own XML output:
+- **Libraries:** 707 of 720 packages, 103 of 104 symbols and 99 of 103 devicesets (with their pin–pad connects) are identical to the same libraries saved by EAGLE 6/7. The rest are real library edits between revisions.
+- **Netlists:** a converted binary board matches EAGLE's own XML schematic of the same revision on every pad (1,606 pads). All 111 converted schematic/board pairs agree on 147,117 pads with no split, merged or renamed net.
+- **Geometry:** 11,503 signal items and all part placements of a converted board are identical to the XML of the same, otherwise unchanged board.
+
 **Test report:** [docs/test-report-2026-10-08.pdf](docs/test-report-2026-10-08.pdf) — per-design results, the history of the four full corpus runs (14/18 → 18/18, shorting items 65 → 77 → 26), what remains after the fix and why, timings, renders.
 
 Timing on a desktop PC: import 23–31 s per design (board via `kicad-cli` 0.4–1.1 s, schematic via KiCad's GUI importer 22–29 s), fix + quality control + 3D renders 52–206 s depending on board size.
@@ -119,7 +126,7 @@ Click **Report a problem...** in the Eagle Exhumer window. It packs a diagnostic
 
 ## Known limits
 
-- EAGLE 5 and older binary files cannot be read by KiCad. Save them once as XML in EAGLE 6+ or Fusion first.
+- Binary EAGLE files: verified on EAGLE 4.16 single-sheet designs. Multi-sheet binary schematics and EAGLE 5 specific records are decoded but not yet verified on real files; the converter cross-check and the quality control report any mismatch. EAGLE 3.x is untested.
 - EAGLE designs carry no 3D models, so renders show the bare board.
 - A reference collision stays a FAIL until you rename one of the parts.
 - PWR_FLAG placement is not yet netlist-verified.

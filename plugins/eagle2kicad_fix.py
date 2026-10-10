@@ -143,6 +143,13 @@ def _unit(v):
     x = float(m.group(1)); u = m.group(2)
     return {'mil': x * 0.0254, 'mm': x, 'mic': x / 1000.0, 'inch': x * 25.4, 'in': x * 25.4}.get(u, x)
 
+try:
+    from eagle_bin import is_binary_eagle, EagleBinaryError, prepare_sources as prepare_eagle_sources, summary as eagle_bin_summary
+except ImportError:                                    # running from another folder
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from eagle_bin import is_binary_eagle, EagleBinaryError, prepare_sources as prepare_eagle_sources, summary as eagle_bin_summary
+
+
 def eagle_root(path):
     try:
         r = ET.parse(path).getroot()
@@ -2884,14 +2891,23 @@ def main():
     has_pcb = os.path.isfile(pcb)
     esch = a.eagle_sch or next((f for f in glob.glob(os.path.join(d, '*.sch')) if eagle_root(f) is not None), None)
     ebrd = a.eagle_brd or next((f for f in glob.glob(os.path.join(d, '*.brd')) if eagle_root(f) is not None), None)
+    # binary EAGLE (<= 5.x) sources are converted to EAGLE XML first (eagle_bin.py); the XML copies
+    # live in <project>/eagle_source and are the reference for the quality control from here on
+    bin_notes = []
+    if not esch and not ebrd:
+        esch = next((f for f in glob.glob(os.path.join(d, '*.sch')) if is_binary_eagle(f)), None)
+        ebrd = next((f for f in glob.glob(os.path.join(d, '*.brd')) if is_binary_eagle(f)), None)
+    if any(f and is_binary_eagle(f) for f in (esch, ebrd)):
+        src_dir = os.path.join(d, 'eagle_source')
+        try:
+            mapping, binfo = prepare_eagle_sources([esch, ebrd], src_dir, log=lambda m: bin_notes.append(m.strip()))
+        except EagleBinaryError as ex:
+            sys.exit(f'binary EAGLE file could not be converted: {ex}')
+        esch, ebrd = mapping.get(esch, esch), mapping.get(ebrd, ebrd)
+        IMPORT_META.setdefault('binary_source', eagle_bin_summary(binfo))
     for f in (esch, ebrd):
         if f and eagle_root(f) is None:
-            with open(f, 'rb') as fh:
-                head = fh.read(400)
-            if b'<eagle' not in head and b'<?xml' not in head:
-                sys.exit(f'{os.path.basename(f)}: binary EAGLE file (EAGLE 5.x or older). KiCad and this tool read '
-                         'only EAGLE 6+ XML - open it in EAGLE 6...9 (or Fusion Electronics), save it once, retry.')
-            sys.exit(f'{os.path.basename(f)}: not a readable EAGLE XML file')
+            sys.exit(f'{os.path.basename(f)}: not a readable EAGLE file')
     cli = find_kicad_cli(a.kicad_cli)
     # the fix steps are not idempotent (milling, labels, net ties): a second run would duplicate them
     hist = os.path.join(d, 'eaglefix_history.jsonl')
@@ -2908,6 +2924,18 @@ def main():
     progress(1, 'Reading the project')
     R.h('Project')
     R.p(f'project `{proj}`, sch `{os.path.basename(root_sch)}`, pcb: {has_pcb}')
+    bs = IMPORT_META.get('binary_source')
+    if bs:
+        R.p('Eagle source is the **binary EAGLE format** (' + ', '.join(f"{x['file']}: EAGLE {x['eagle']} {x['kind']}"
+            for x in bs.get('files', [])) + f"), converted to EAGLE XML by {bs.get('converter')}; the converted "
+            'XML is the reference of every check below')
+        cc = bs.get('crosscheck')
+        if cc:
+            R.p('converter cross-check (converted schematic vs converted board netlist): ' +
+                (f"identical, {cc['pins']} pads" if cc['ok'] else f"**differs** {cc['counts']}"))
+    for m in bin_notes:
+        if not m.startswith('converter cross-check'):        # already reported above
+            R.p('converter: ' + m)
     R.p(f'Eagle sch: {esch}  |  Eagle brd: {ebrd}  |  kicad-cli: {cli}')
     for m in IMPORT_META.get('kicad_messages') or []:     # message boxes KiCad showed during the import
         R.p(f"KiCad import message ({m.get('action')}): \"{m.get('title')}\" {m.get('text') or '(text not readable)'}")
