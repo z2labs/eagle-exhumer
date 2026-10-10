@@ -30,7 +30,10 @@ def _txt(s):
 
 def eagle_devices(lbr_path):
     """{deviceset+device: dict(ds, dev, package, pads{pin-key: [pads]}, gates, desc, prefix)}"""
-    L = ET.parse(lbr_path).getroot().find('drawing/library')
+    r = ET.parse(lbr_path).getroot()                 # .lbr, or the synthetic .sch that embeds it
+    L = r.find('drawing/library')
+    if L is None:
+        L = r.find('.//libraries/library')
     out = {}
     for ds in L.findall('devicesets/deviceset'):
         desc = _txt(ds.findtext('description') or '')
@@ -141,11 +144,12 @@ def export_symbols(sym_path, devices, lib, out_dir, rep):
 def export_footprints(pcb_path, lib, out_dir, packages, rep):
     import pcbnew
     pretty = os.path.join(out_dir, lib + '.pretty')
+    io = pcbnew.PCB_IO_MGR.FindPlugin(pcbnew.PCB_IO_MGR.KICAD_SEXP)
     if os.path.isdir(pretty):
         for f in glob.glob(os.path.join(pretty, '*.kicad_mod')):
             os.remove(f)
     else:
-        pcbnew.FootprintLibCreate(pretty)
+        os.makedirs(pretty)
     board = pcbnew.LoadBoard(pcb_path)
     done = {}
     for fp in board.GetFootprints():
@@ -161,7 +165,7 @@ def export_footprints(pcb_path, lib, out_dir, packages, rep):
         fp.SetReference('REF**')
         fp.SetValue(name)
         fp.SetFPID(pcbnew.LIB_ID('', name))
-        pcbnew.FootprintSave(pretty, fp)
+        io.FootprintSave(pretty, fp)
         done[name] = fp.Pads().size() if hasattr(fp.Pads(), 'size') else len(list(fp.Pads()))
     missing = [p for p in packages if p not in done]
     rep.update(footprints=len(done), missing_packages=missing)
