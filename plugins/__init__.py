@@ -39,6 +39,7 @@ def _python():
 
 
 from cli_pcb_import import cli_import_pcb
+import eagle_bin
 
 
 def _walk_menu(menu):
@@ -352,6 +353,43 @@ class LogWindow(wx.Frame):
 
 # ------------------------------------------------------------------ job
 
+def _binary_sources(src):
+    """Binary EAGLE (<= 5.x) files cannot be read by KiCad: convert the .sch/.brd pair to EAGLE XML
+    in a temporary folder and continue with those copies. Returns (path to use, info) or (None, None)
+    when the user cancels or the conversion fails."""
+    base = os.path.splitext(src)[0]
+    cands = []
+    for f in (src, base + '.sch', base + '.SCH', base + '.brd', base + '.BRD'):
+        if os.path.isfile(f) and f not in cands and not any(os.path.samefile(f, c) for c in cands):
+            cands.append(f)
+    if not any(eagle_bin.is_binary_eagle(f) for f in cands):
+        return src, None
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix='eagle_exhumer_bin_')
+    lines = []
+    busy = wx.BusyInfo('Converting the binary EAGLE files to EAGLE XML...')
+    try:
+        mapping, info = eagle_bin.prepare_sources(cands, tmp, log=lines.append)
+    except Exception as ex:                                     # EagleBinaryError or a damaged file
+        del busy
+        wx.MessageBox(f'{os.path.basename(src)} is a binary EAGLE file (EAGLE 5.x or older), and it could '
+                      f'not be converted:\n\n{ex}\n\nOpen it in EAGLE 6...9 (or Fusion Electronics), save it '
+                      'once, then run this import again.', 'Eagle Exhumer', wx.ICON_WARNING)
+        return None, None
+    del busy
+    cc = info.get('crosscheck')
+    msg = ('Binary EAGLE files (EAGLE 5.x or older) were found. KiCad reads only EAGLE 6+ XML, so Eagle '
+           'Exhumer converted them first:\n\n' + '\n'.join(l.strip() for l in lines) + '\n\n')
+    if cc and not cc['ok']:
+        msg += ('The converted schematic and board do not describe the same netlist (see above). This can '
+                'be a real difference in the old design. The quality control will report the details.\n\n')
+    msg += ('The converted XML files are kept in the project (eagle_source), together with the original '
+            'binary files.\n\nContinue?')
+    if wx.MessageBox(msg, 'Eagle Exhumer - binary EAGLE file', wx.YES_NO | wx.ICON_INFORMATION) != wx.YES:
+        return None, None
+    return mapping.get(src, src), info
+
+
 class ImportJob:
     def __init__(self, manager, eagle_mid, src, target):
         self.mgr, self.mid, self.src, self.target = manager, eagle_mid, src, target
@@ -514,10 +552,21 @@ class ImportJob:
                     shutil.copy2(cand, dst)
                     args += [opt, dst]
                     break
+        bin_info = getattr(self, 'bin_info', None)
+        if bin_info:
+            keep = os.path.join(src_dir, 'original_binary')
+            os.makedirs(keep, exist_ok=True)
+            for c in bin_info.get('converted', []):
+                try:
+                    shutil.copy2(c['source'], os.path.join(keep, os.path.basename(c['source'])))
+                except OSError:
+                    pass
         self.log('\n2) eagle2kicad_fix...')
         self.stage(self.fix_base, f'{self.fix_step} - Repair and quality control')
         import json as _json
         meta = dict(getattr(self, 'import_meta', {}) or {})
+        if bin_info:
+            meta['binary_source'] = eagle_bin.summary(bin_info)
         drv = getattr(self, 'driver', None)
         if drv is not None and drv.messages:                 # KiCad message boxes of the import
             meta['kicad_messages'] = [{'title': t, 'text': x, 'action': a} for t, x, a in drv.messages]
@@ -763,12 +812,16 @@ class Eagle2KiCadImport(pcbnew.ActionPlugin):
                 return
             src = dlg.GetPath()
             dlg.Destroy()
+            src, bin_info = _binary_sources(src)
+            if src is None:
+                return
             if wx.MessageBox('The schematic and PCB editors will be closed (KiCad asks to save unsaved '
                              'changes), the project files are fixed in place - a backup is kept in '
                              '_eaglefix_backup - and the editors are reopened.\n\nContinue?',
                              'Eagle Exhumer', wx.YES_NO | wx.ICON_QUESTION) != wx.YES:
                 return
             job = FixJob(mgr, src, pro)
+            job.bin_info = bin_info
             job.other_project = other_project
             wx.CallAfter(job.start)
             return
@@ -779,17 +832,10 @@ class Eagle2KiCadImport(pcbnew.ActionPlugin):
             return
         src = dlg.GetPath()
         dlg.Destroy()
-        base = os.path.splitext(src)[0]
-        for f in (src, base + '.sch', base + '.brd'):
-            if os.path.isfile(f):
-                with open(f, 'rb') as fh:
-                    head = fh.read(400)
-                if b'<eagle' not in head and b'<?xml' not in head:
-                    wx.MessageBox(f'{os.path.basename(f)} is a binary EAGLE file (EAGLE 5.x or older).\n\n'
-                                  'KiCad can only import EAGLE 6+ XML files. Open it in EAGLE 6...9 '
-                                  '(or Fusion Electronics) and save it once, then run this import again.',
-                                  'Eagle Exhumer', wx.ICON_WARNING)
-                    return
+        orig_src = src
+        src, bin_info = _binary_sources(src)
+        if src is None:
+            return
         name = os.path.splitext(os.path.basename(src))[0]
 
         def free(base):
@@ -797,7 +843,7 @@ class Eagle2KiCadImport(pcbnew.ActionPlugin):
             while os.path.isdir(t) and os.listdir(t):
                 t = os.path.join(base, f'{name}_kicad_{k}'); k += 1
             return t
-        target = free(os.path.dirname(src))
+        target = free(os.path.dirname(orig_src))
         dlg = wx.MessageDialog(None, f'Where should the new KiCad project go?\n\n'
                                      f'Suggested: a new sub-folder next to the Eagle file\n{target}',
                                'Eagle Exhumer - destination', wx.YES_NO | wx.CANCEL | wx.ICON_QUESTION)
@@ -807,7 +853,7 @@ class Eagle2KiCadImport(pcbnew.ActionPlugin):
             return
         if ans == wx.ID_NO:
             dd = wx.DirDialog(None, 'Folder for the new KiCad project (a sub-folder is created inside it '
-                                    'if it is not empty)', defaultPath=os.path.dirname(src),
+                                    'if it is not empty)', defaultPath=os.path.dirname(orig_src),
                               style=wx.DD_DEFAULT_STYLE)
             if dd.ShowModal() != wx.ID_OK:
                 dd.Destroy(); return
@@ -815,6 +861,7 @@ class Eagle2KiCadImport(pcbnew.ActionPlugin):
             target = base if (os.path.isdir(base) and not os.listdir(base)) else free(base)
         os.makedirs(target, exist_ok=True)
         job = ImportJob(mgr, mid, src, target)
+        job.bin_info = bin_info
         wx.CallAfter(job.start)        # leave the PCB frame's event handler first: KiCad closes it
 
 

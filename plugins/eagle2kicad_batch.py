@@ -11,8 +11,8 @@ verification + fault-injection selftest) and writes one summary table for all de
 Run with KiCad's python:
   "C:\\Program Files\\KiCad\\10.0\\bin\\python.exe" eagle2kicad_batch.py <file.sch|file.brd|folder> ...
       [--out-suffix _kicad] [--force] [--timeout 600]
-A folder is searched recursively for Eagle XML .sch/.brd pairs; binary (Eagle <= 5) files are
-reported and skipped. Output: <name>_kicad next to each design, batch_summary.md in the cwd.
+A folder is searched recursively for Eagle .sch/.brd pairs; binary (EAGLE <= 5.x) files are
+converted to EAGLE XML first (eagle_bin.py). Output: <name>_kicad next to each design, batch_summary.md in the cwd.
 """
 import argparse, ctypes, glob, json, os, re, shutil, subprocess, sys, time
 from ctypes import wintypes
@@ -20,6 +20,7 @@ from ctypes import wintypes
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from win_dialogs import DialogDriver, _dialogs, _title, is_progress, dialog_text as _dialog_text_full  # noqa: E402
+from eagle_bin import is_binary_eagle, EagleBinaryError, prepare_sources as prepare_eagle_sources, summary as eagle_bin_summary  # noqa: E402
 
 U = ctypes.windll.user32
 WM_COMMAND, WM_CLOSE, MF_BYPOSITION = 0x0111, 0x0010, 0x400
@@ -306,7 +307,8 @@ def find_designs(paths):
         p = os.path.abspath(p)
         files = [p] if os.path.isfile(p) else glob.glob(os.path.join(p, '**', '*.*'), recursive=True)
         for f in files:
-            if f.lower().endswith(('.sch', '.brd')) and '_kicad' not in f and 'eagle_source' not in f:
+            if f.lower().endswith(('.sch', '.brd')) and '_kicad' not in f and 'eagle_source' not in f \
+                    and (is_xml(f) or is_binary_eagle(f)):
                 pairs.setdefault(os.path.splitext(f)[0], {})[f.lower()[-3:]] = f
     return pairs
 
@@ -324,10 +326,21 @@ def main():
     for base, fs in sorted(find_designs(a.paths).items()):
         sch, brd = fs.get('sch'), fs.get('brd')
         label = os.path.relpath(base)
-        bad = [f for f in (sch, brd) if f and not is_xml(f)]
-        if bad or not sch:
-            why = 'binary Eagle (<=5): ' + ', '.join(os.path.basename(b) for b in bad) if bad else 'no .sch'
-            log(f'SKIP {label}: {why}'); rows.append((label, 'SKIP', why, {})); continue
+        if not sch:
+            log(f'SKIP {label}: no .sch'); rows.append((label, 'SKIP', 'no .sch', {})); continue
+        binary = [f for f in (sch, brd) if f and is_binary_eagle(f)]
+        if binary:
+            # binary EAGLE (<= 5.x): convert to EAGLE XML first; KiCad imports the XML copies
+            import tempfile
+            tmp = tempfile.mkdtemp(prefix='eagle_exhumer_bin_')
+            try:
+                mapping, binfo = prepare_eagle_sources([sch, brd], tmp, log=lambda m: log('    ' + m.strip()))
+            except EagleBinaryError as ex:
+                log(f'SKIP {label}: binary EAGLE conversion failed: {ex}')
+                rows.append((label, 'SKIP', f'binary conversion failed: {ex}', {})); continue
+            sch, brd = mapping.get(sch, sch), mapping.get(brd, brd)
+        else:
+            binfo = None
         target = base + a.out_suffix
         if os.path.isdir(target) and os.listdir(target):
             if not a.force:
@@ -339,6 +352,8 @@ def main():
             t_c = time.time()
             meta = convert(sch, target, a.timeout, brd=brd, method=a.method)
             meta['convert_total_s'] = round(time.time() - t_c, 1)
+            if binfo:
+                meta['binary_source'] = eagle_bin_summary(binfo)
             t_f = time.time()
             rc, out = run_fix(target, sch, brd, meta)
             log(f'    fix {time.time() - t_f:.0f} s, convert {meta["convert_total_s"]} s ({meta["method"]})')
