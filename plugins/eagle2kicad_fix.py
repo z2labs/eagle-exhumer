@@ -2688,22 +2688,13 @@ def _slot_to_pad(pcbnew, fp, grp):
     as an oval drill (Edge.Cuts inside a pad would be a NON-plated cut-out + DRC errors)."""
     if any(sh.GetShape() == pcbnew.SHAPE_T_CIRCLE for sh in grp):
         return False
-    if len(grp) == 1:
-        # a single milling line with a width = a routed slot (USB-C shell legs): its extent is the
-        # line grown by half the tool width; only axis-parallel slots map onto an oval drill
-        sh = grp[0]
-        if sh.GetShape() != pcbnew.SHAPE_T_SEGMENT or sh.GetWidth() < 200000:
-            return False
-        a, b = sh.GetStart(), sh.GetEnd()
-        if a.x != b.x and a.y != b.y:
-            return False
-        hw = sh.GetWidth() // 2
-        x0, x1 = min(a.x, b.x) - hw, max(a.x, b.x) + hw
-        y0, y1 = min(a.y, b.y) - hw, max(a.y, b.y) + hw
-    else:
-        pts = [p for sh in grp for p in _shape_pts(sh)]
-        x0, x1 = min(p.x for p in pts), max(p.x for p in pts)
-        y0, y1 = min(p.y for p in pts), max(p.y for p in pts)
+    if len(grp) < 2:
+        # a single routed milling line: EAGLE CAM keeps the round drill and mills the slot -
+        # kept that way (closed tool-width contour, see _milling_contour), the drill file matches
+        return False
+    pts = [p for sh in grp for p in _shape_pts(sh)]
+    x0, x1 = min(p.x for p in pts), max(p.x for p in pts)
+    y0, y1 = min(p.y for p in pts), max(p.y for p in pts)
     W, H = x1 - x0, y1 - y0
     if min(W, H) <= 0 or max(W, H) > 10e6:
         return False
