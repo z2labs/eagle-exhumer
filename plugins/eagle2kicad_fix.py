@@ -1799,7 +1799,65 @@ def verify_geometry(pcb_path, ebrd):
         f'{n_mill} Edge.Cuts shapes from Eagle milling, copper layers {e_cu} vs {k_cu}')
     for s_ in issues[:60]:
         R.p('  ' + s_)
+    # 6. plating of every hole: Eagle pads and vias are plated, Eagle <hole>s are not. A hole at the
+    #    right place with the right drill but the wrong plating is a dead via / a shorting screw hole.
+    e_holes = []                                     # (kx, ky, drill, plated, what)
+    for e in els:
+        key = (e.get('library'), e.get('library_urn', ''), e.get('package'))
+        pkg = pk.get(key) or next((v for k_, v in pk.items() if k_[0] == key[0] and k_[2] == key[2]), None)
+        if pkg is None:
+            continue
+        mir, ang = _eagle_rot(e.get('rot'))
+        ca, sa = math.cos(math.radians(ang)), math.sin(math.radians(ang))
+        ex, ey = float(e.get('x')), float(e.get('y'))
+        for q in pkg:
+            if q.tag not in ('pad', 'hole'):
+                continue
+            x, y = float(q.get('x')), float(q.get('y'))
+            rx, ry = x * ca - y * sa, x * sa + y * ca
+            if mir:
+                rx = -rx
+            e_holes.append((ex + rx + ox, -(ey + ry) + oy, float(q.get('drill')), q.tag == 'pad',
+                            f"{kref(e.get('name'))}.{q.get('name') or 'hole'}"))
+    for h in brd.findall('plain/hole'):
+        e_holes.append((float(h.get('x')) + ox, -float(h.get('y')) + oy, float(h.get('drill')), False, 'board hole'))
+    for sig in brd.findall('signals/signal'):
+        for v in sig.findall('via'):
+            e_holes.append((float(v.get('x')) + ox, -float(v.get('y')) + oy, float(v.get('drill')), True, f"via {sig.get('name')}"))
+    k_holes = defaultdict(list)                      # grid cell -> (x, y, drill, plated)
+    def _cell(x, y):
+        return (round(x / 0.05), round(y / 0.05))
+    for fp in board.GetFootprints():
+        for pd in fp.Pads():
+            ds = pd.GetDrillSize()
+            if ds.x <= 0:
+                continue
+            x, y = pd.GetPosition().x / 1e6, pd.GetPosition().y / 1e6
+            k_holes[_cell(x, y)].append((x, y, min(ds.x, ds.y) / 1e6, pd.GetAttribute() != pcbnew.PAD_ATTRIB_NPTH))
+    for t in board.GetTracks():
+        if t.GetClass() == 'PCB_VIA':
+            x, y = t.GetPosition().x / 1e6, t.GetPosition().y / 1e6
+            k_holes[_cell(x, y)].append((x, y, t.GetDrillValue() / 1e6, True))
+    n_plating = n_hole_miss = 0
+    hole_issues = []
+    for x, y, d, plated, what in e_holes:
+        cx, cy = _cell(x, y)
+        near = [h for i in (-1, 0, 1) for j in (-1, 0, 1) for h in k_holes.get((cx + i, cy + j), ())
+                if math.hypot(h[0] - x, h[1] - y) <= 0.01 and abs(h[2] - d) <= 0.01]
+        if not near:
+            n_hole_miss += 1
+            if n_hole_miss <= 5: hole_issues.append(f'{what}: Eagle hole {d:g} mm at ({x:.3f}, {y:.3f}) has no KiCad hole')
+            continue
+        if not any(h[3] == plated for h in near):
+            n_plating += 1
+            if n_plating <= 10: hole_issues.append(f'{what}: hole {d:g} mm is {"PLATED" if plated else "NON-plated"} in Eagle, '
+                                              f'{"plated" if near[0][3] else "NON-plated"} in KiCad')
+    R.p(f'**Eagle holes vs KiCad holes**: {len(e_holes)} holes ({sum(1 for h in e_holes if h[3])} plated, '
+        f'{sum(1 for h in e_holes if not h[3])} non-plated), {n_plating} with the wrong plating, {n_hole_miss} without a KiCad hole')
+    for s_ in hole_issues:
+        R.p('  ' + s_)
     GEOM_LOG.append(dict(moved=n_pos, side=n_side, rot=n_rot, val=n_val, padpos=n_padpos, padmiss=n_padmiss,
+                         plating=n_plating, holes_missing=n_hole_miss,
                          padsize=n_padsize, drill=n_paddrill, length=n_len, via=n_via, poly=n_poly,
                          missing_parts=n_missp, extra=len(extra), outline=int(outline_bad), outline_invalid=outline_invalid, unrouted=unrouted_bad,
                          layers=layers_bad))
@@ -3387,6 +3445,15 @@ def selftest(d, proj, cli, esch, ebrd):
         a[ia], b[ib] = b[ib], a[ia]
         used.add(id(fp))
         results.append(('F2 nets of two pads swapped', 'pcbnet', f"{prop_val(fp, 'Reference')}.{a[1]}/{b[1]}"))
+    # F7: a plated through-hole pad turned non-plated (copper, position and drill unchanged)
+    for fp in fps:
+        if id(fp) in used: continue
+        tp = [p_ for p_ in kids(fp, 'pad') if len(p_) > 2 and p_[2] == 'thru_hole']
+        if tp:
+            tp[0][2] = 'np_thru_hole'
+            used.add(id(fp))
+            results.append(('F7 plated pad made non-plated', 'plating', f"{prop_val(fp, 'Reference')}.{tp[0][1]}"))
+            break
     # F3: footprint shifted by 0.2 mm
     for fp in fps:
         if id(fp) in used or kid(fp, 'attr') and 'board_only' in kid(fp, 'attr'): continue
@@ -3470,6 +3537,7 @@ def selftest(d, proj, cli, esch, ebrd):
     cmp = {lab: (m, s_, a_) for lab, m, s_, a_ in COMPARE_LOG}
     caught = {
         'padpos': g.get('padpos', 0) > 0,
+        'plating': g.get('plating', 0) > 0,
         'pcbnet': sum(cmp.get('selftest pcb', (0, 0, 0))[:2]) > 0 or (f2_named and
                   LAST_CMP.get('selftest pcb', {}).get('renamed', 0) > LAST_CMP.get('selftest pcb base', {}).get('renamed', 0)),
         'moved': g.get('moved', 0) > 0,

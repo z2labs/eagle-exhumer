@@ -640,6 +640,31 @@ def _runs_to_geom(geo, prims, dx, dy):
 
 # --------------------------------------------------------------------------- Excellon
 
+class Hole(tuple):
+    """(x, y, drill, slot) with .plated: True / False / None (the drill file does not say)"""
+    plated = None
+
+
+def _hole(t, plated):
+    h = Hole(t); h.plated = plated
+    return h
+
+
+def excellon_plating(path, head):
+    """plating of a drill file from its X2 attribute / comment / file name, else None"""
+    h = head.upper()
+    if 'NONPLATED' in h.replace('_', '').replace('-', '') or 'TYPE=NON_PLATED' in h:
+        return False
+    if 'TF.FILEFUNCTION,PLATED' in h or 'TYPE=PLATED' in h:
+        return True
+    n = os.path.basename(path).upper()
+    if re.search(r'(^|[-_.])NPTH([-_.]|$)', n):
+        return False
+    if re.search(r'(^|[-_.])PTH([-_.]|$)', n):
+        return True
+    return None
+
+
 def read_excellon(path):
     """[(x_mm, y_mm, dia_mm, slot_or_None)]"""
     unit, tz, fmt = INCH, False, None          # tz: True = LZ format (pad on the right)
@@ -848,7 +873,9 @@ def collect(dirpath, geo):
             continue
         head = open(p, encoding='latin-1').read(400)
         if ext in ('.xnc', '.xln', '.drl', '.drd', '.exc', '.txt') and ('M48' in head or head.lstrip().startswith(('T', '%', ';'))):
-            dfiles.append((p, read_excellon(p))); notes.append(f'drill: {_display(p)}'); continue
+            pl = excellon_plating(p, open(p, encoding='latin-1').read(4000))
+            dfiles.append((p, [_hole(h, pl) for h in read_excellon(p)]))
+            notes.append(f'drill: {_display(p)}' + ('' if pl is None else (' (plated)' if pl else ' (non-plated)'))); continue
         if '%FS' not in head and 'G04' not in head and '%MO' not in head:
             continue
         g = Gerber(p, geo)
@@ -887,7 +914,8 @@ def _fit_drill_scale(hs, b, m=1.0):
     best = max((1, 0.1, 10, 0.01, 100), key=inside)
     if inside(best) <= inside(1):
         return hs, 1
-    return [(x * best, y * best, d, None if sl is None else (sl[0] * best, sl[1] * best)) for x, y, d, sl in hs], best
+    return [_hole((h[0] * best, h[1] * best, h[2], None if h[3] is None else (h[3][0] * best, h[3][1] * best)),
+                  getattr(h, 'plated', None)) for h in hs], best
 
 
 # --------------------------------------------------------------------------- alignment + comparison
@@ -925,11 +953,12 @@ def align(he, hk):
 
 
 def compare_drills(he, hk, dx, dy, tol=0.03, dtol=0.02):
-    used = set(); miss = []; dia = []
+    used = set(); miss = []; dia = []; plat = []; known = 0
     grid = defaultdict(list)
     for i, (x, y, d, s) in enumerate(hk):
         grid[(round((x + dx) / 0.5), round((y + dy) / 0.5))].append(i)
-    for x, y, d, s in he:
+    for he_h in he:
+        x, y, d, s = he_h
         gx, gy = round(x / 0.5), round(y / 0.5)
         best = None
         for ax in (gx - 1, gx, gx + 1):
@@ -947,9 +976,14 @@ def compare_drills(he, hk, dx, dy, tol=0.03, dtol=0.02):
         kd = hk[best[1]][2]
         if abs(kd - d) > dtol:
             dia.append((x, y, d, kd))
+        pe, pk_ = getattr(he_h, 'plated', None), getattr(hk[best[1]], 'plated', None)
+        if pe is not None and pk_ is not None:
+            known += 1
+            if pe != pk_:
+                plat.append((x, y, d, pe, pk_))
     extra = [(hk[i][0] + dx, hk[i][1] + dy, hk[i][2]) for i in range(len(hk)) if i not in used]
     return dict(eagle=len(he), kicad=len(hk), matched=len(used), missing_in_kicad=miss, extra_in_kicad=extra,
-                diameter_differs=dia)
+                diameter_differs=dia, plating_known=known, plating_differs=plat)
 
 
 def brd_offset(brd_path, he):
@@ -1106,6 +1140,13 @@ def verdict(res, spot_min=0.05):
         if d['missing_in_kicad'] or d['extra_in_kicad'] or d['diameter_differs']:
             fails.append(f"drill: {len(d['missing_in_kicad'])} missing, {len(d['extra_in_kicad'])} extra, "
                          f"{len(d['diameter_differs'])} other diameter (of {d['eagle']})")
+        if d.get('plating_differs'):
+            fails.append(f"drill plating: {len(d['plating_differs'])} holes plated on one side only - "
+                         + '; '.join(f"({x:.2f}, {y:.2f}) {dd:g} mm EAGLE {'PTH' if pe else 'NPTH'} / KiCad {'PTH' if pk else 'NPTH'}"
+                                     for x, y, dd, pe, pk in d['plating_differs'][:5]))
+        if not d.get('plating_known'):
+            infos.append('drill plating not compared: the EAGLE drill files do not mark plated / non-plated holes '
+                         '(plating is checked against the .brd by the quality control)')
     else:
         warns.append('drill files missing on one side - drill not compared')
     for k, e in sorted(res['layers'].items()):
