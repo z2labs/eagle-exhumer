@@ -1763,6 +1763,23 @@ def verify_geometry(pcb_path, ebrd):
     if (mill_paths or mill_circles) and not n_mill:
         issues.append(f'Eagle milling (layer 46, {len(mill_paths) + len(mill_circles)} items) has no Edge.Cuts counterpart')
     outline_bad = bool(e_out and abs(e_out - k_out) > max(0.05, 0.002 * e_out))
+    # dangling Dimension wires (an open end in the EAGLE source): KiCad's importer may drop such a
+    # stub - when the length difference is exactly the stubs, it is the source's flaw, reported
+    from collections import Counter as _C
+    _deg = _C()
+    for w in dim_wires:
+        for k_ in (('x1', 'y1'), ('x2', 'y2')):
+            _deg[(round(float(w.get(k_[0])), 3), round(float(w.get(k_[1])), 3))] += 1
+    dangling = sorted(p_ for p_, n_ in _deg.items() if n_ % 2)
+    if outline_bad and dangling:
+        _dset = set(dangling)
+        stub = sum(_eagle_wire_len(w) for w in dim_wires
+                   if (round(float(w.get('x1')), 3), round(float(w.get('y1')), 3)) in _dset
+                   or (round(float(w.get('x2')), 3), round(float(w.get('y2')), 3)) in _dset)
+        if abs(e_out - stub - k_out) <= max(0.05, 0.002 * e_out) or abs(e_out - k_out) <= stub + 0.05:
+            outline_bad = False
+            R.p(f'WARNING: board outline length Eagle {e_out:.2f} mm, KiCad {k_out:.2f} mm - the difference is '
+                f'the dangling Dimension wire(s) of the open EAGLE outline ({stub:.2f} mm)')
     if outline_bad:
         issues.append(f'board outline length Eagle {e_out:.2f} mm, KiCad {k_out:.2f} mm')
     # the KiCad outline must also be a VALID closed board polygon (zone fill and fab depend on it)
@@ -1775,12 +1792,6 @@ def verify_geometry(pcb_path, ebrd):
     if outline_invalid:
         # an outline that is already open in the EAGLE source (dangling Dimension wire) is copied
         # faithfully - reported, not failed: the designer has to close it in either tool
-        from collections import Counter as _C
-        deg = _C()
-        for w in dim_wires:
-            for k in (('x1', 'y1'), ('x2', 'y2')):
-                deg[(round(float(w.get(k[0])), 3), round(float(w.get(k[1])), 3))] += 1
-        dangling = sorted(p_ for p_, n_ in deg.items() if n_ % 2)
         if dangling:
             outline_invalid = 0
             R.p(f'WARNING: the EAGLE board outline itself is open ({len(dangling)} dangling Dimension wire ends, '
@@ -2236,6 +2247,8 @@ def eagle_inner_round_pads(pcb_path, ebrd, dry, quiet=False):
             for pad in fp.Pads():
                 if pad.GetAttribute() != pcbnew.PAD_ATTRIB_PTH or pad.GetDrillSize().x <= 0:
                     continue
+                if pad.GetDrillSize().x != pad.GetDrillSize().y:
+                    continue                          # slotted pad: one oval shape on every layer
                 dr = min(pad.GetDrillSize().x, pad.GetDrillSize().y) / 1e6
                 sz = pad.GetSize(pcbnew.F_Cu)
                 # inner layers: restring rule only, the library diameter applies to the outer layers
@@ -2638,14 +2651,59 @@ def _clusters(shapes_):
     return list(g.values())
 
 
+def _open_group(grp):
+    """True when the milling shapes do not form a closed contour (an end point used once)"""
+    from collections import Counter as _C
+    deg = _C()
+    for sh in grp:
+        if sh.GetShape() == getattr(__import__('pcbnew'), 'SHAPE_T_CIRCLE', -1):
+            return False
+        for p in (sh.GetStart(), sh.GetEnd()):
+            deg[(round(p.x / 1e4), round(p.y / 1e4))] += 1
+    return any(n % 2 for n in deg.values())
+
+
+def _milling_contour(pcbnew, fp, grp):
+    """closed Edge.Cuts polygon around an open milling path, tool width included"""
+    try:
+        ps = pcbnew.SHAPE_POLY_SET()
+        for sh in grp:
+            sh.TransformShapeToPolygon(ps, pcbnew.Edge_Cuts, 0, 5000, pcbnew.ERROR_INSIDE)
+        ps.Simplify()
+        if ps.OutlineCount() != 1:
+            return None
+        c = pcbnew.PCB_SHAPE(fp)
+        c.SetShape(pcbnew.SHAPE_T_POLY)
+        c.SetLayer(pcbnew.Edge_Cuts)
+        c.SetPolyShape(ps)
+        c.SetFilled(False)
+        c.SetWidth(50000)
+        return c
+    except Exception:
+        return None
+
+
 def _slot_to_pad(pcbnew, fp, grp):
     """A closed milled contour around exactly one plated hole = a plated slot. KiCad models that
     as an oval drill (Edge.Cuts inside a pad would be a NON-plated cut-out + DRC errors)."""
-    if len(grp) < 2 or any(sh.GetShape() == pcbnew.SHAPE_T_CIRCLE for sh in grp):
+    if any(sh.GetShape() == pcbnew.SHAPE_T_CIRCLE for sh in grp):
         return False
-    pts = [p for sh in grp for p in _shape_pts(sh)]
-    x0, x1 = min(p.x for p in pts), max(p.x for p in pts)
-    y0, y1 = min(p.y for p in pts), max(p.y for p in pts)
+    if len(grp) == 1:
+        # a single milling line with a width = a routed slot (USB-C shell legs): its extent is the
+        # line grown by half the tool width; only axis-parallel slots map onto an oval drill
+        sh = grp[0]
+        if sh.GetShape() != pcbnew.SHAPE_T_SEGMENT or sh.GetWidth() < 200000:
+            return False
+        a, b = sh.GetStart(), sh.GetEnd()
+        if a.x != b.x and a.y != b.y:
+            return False
+        hw = sh.GetWidth() // 2
+        x0, x1 = min(a.x, b.x) - hw, max(a.x, b.x) + hw
+        y0, y1 = min(a.y, b.y) - hw, max(a.y, b.y) + hw
+    else:
+        pts = [p for sh in grp for p in _shape_pts(sh)]
+        x0, x1 = min(p.x for p in pts), max(p.x for p in pts)
+        y0, y1 = min(p.y for p in pts), max(p.y for p in pts)
     W, H = x1 - x0, y1 - y0
     if min(W, H) <= 0 or max(W, H) > 10e6:
         return False
@@ -2665,6 +2723,12 @@ def _slot_to_pad(pcbnew, fp, grp):
         cur = pad.GetSize(pcbnew.F_Cu)
     except Exception:
         cur = pad.GetSize()
+    try:                                              # one pad shape on every layer for a slot
+        ps = pad.Padstack()
+        if ps.Mode() != pcbnew.PADSTACK.MODE_NORMAL:
+            ps.SetMode(pcbnew.PADSTACK.MODE_NORMAL); pad.SetPadstack(ps)
+    except Exception:
+        pass
     ring = max(150000, (min(cur.x, cur.y) - max(old_drill.x, old_drill.y)) // 2)
     size = pcbnew.VECTOR2I(int(dw + 2 * ring), int(dh + 2 * ring))
     pad.SetPosition(pcbnew.VECTOR2I(int((x0 + x1) / 2), int((y0 + y1) / 2)))
@@ -2752,7 +2816,7 @@ def add_milling(pcb_path, ebrd, dry):
             out.append(sh)
         return out
 
-    n_el = n_sh = n_skip = n_slot = 0
+    n_el = n_sh = n_skip = n_slot = n_open = 0
     for el in brd.findall('elements/element'):
         key = (el.get('library'), el.get('library_urn', ''), el.get('package'))
         items = pk.get(key) or next((v for k, v in pk.items() if k[0] == key[0] and k[2] == key[2]), None)
@@ -2774,6 +2838,12 @@ def add_milling(pcb_path, ebrd, dry):
         for grp in _clusters(new):
             if _slot_to_pad(pcbnew, fp, grp):
                 n_slot += 1; continue
+            if _open_group(grp):
+                # an open milling path is a routed slot of the tool width: its cut is the closed
+                # contour around the path (an open line on Edge.Cuts is an invalid board outline)
+                c = _milling_contour(pcbnew, fp, grp)
+                if c is not None:
+                    fp.Add(c); n_sh += 1; n_open += 1; continue
             for sh in grp:
                 fp.Add(sh); n_sh += 1
         n_el += 1
@@ -2807,6 +2877,8 @@ def add_milling(pcb_path, ebrd, dry):
                 f'(e.g. enclosure cut-out drawings) -> Dwgs.User, NOT cut - check the fab notes')
     if n_slot:
         R.p(f'{n_slot} milled slots around plated holes -> plated oval drills (KiCad style, e.g. USB-C shell)')
+    if n_open:
+        R.p(f'{n_open} open milling paths -> closed Edge.Cuts contour of the tool width (routed slot)')
     R.p(f'{n_sh} milling items in {n_el} footprints, {n_plain} board-level milling items -> Edge.Cuts'
         + (f' ({n_skip} footprints already had Edge.Cuts - left alone)' if n_skip else ''))
     if (n_sh or n_plain or n_slot or n_user) and not dry:
