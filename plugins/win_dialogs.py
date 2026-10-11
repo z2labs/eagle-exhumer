@@ -16,6 +16,7 @@ if os.name == 'nt':
     U.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPVOID]
     U.SendMessageW.restype = ctypes.c_ssize_t
     U.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]; U.GetWindow.restype = wintypes.HWND
+    U.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
     TDM_CLICK_BUTTON, IDOK = 0x0400 + 102, 1
 
 # KiCad messages that are known to be harmless during the EAGLE import and may be confirmed
@@ -310,16 +311,17 @@ class DialogDriver(threading.Thread):
                 U.ShowWindow(h, 7)                       # SW_SHOWMINNOACTIVE
                 self.old_frames.add(h)
 
-    def _enter(self, d, ed, ok, path, tries=4):
+    def _enter(self, d, ed, ok, path, tries=4, start=0):
         """Type the path, verify it reads back, press OK and make sure the dialog took it. A file
         dialog that was still building can drop or garble the text and then answers with a 'file not
         found' box (seen on loaded machines): that box is closed and the path entered again."""
-        for k in range(tries):
-            U.SendMessageW(ed, WM_SETTEXT, 0, ctypes.c_wchar_p(path))
+        for k in range(start, start + tries):
+            name = path if k == 0 else os.path.basename(path)  # after a retry the folder is open
+            U.SendMessageW(ed, WM_SETTEXT, 0, ctypes.c_wchar_p(name))
             time.sleep(0.3 + 0.4 * k)
             buf = ctypes.create_unicode_buffer(2048)
             U.SendMessageW(ed, 0x000D, 2048, buf)            # WM_GETTEXT
-            if buf.value != path:
+            if buf.value != name:
                 continue
             U.SendMessageW(ok, BM_CLICK, 0, None)
             t1 = time.time()
@@ -328,16 +330,34 @@ class DialogDriver(threading.Thread):
                     return True                              # the dialog closed: path accepted
                 err = [x for x in _dialogs(self.pid) if x != d and x not in self.seen and not _name_edit(x)]
                 if err:
-                    self.log(f'  [dialog "{_title(d)}"] retry {k + 1}: {dialog_text(err[0])[:80]}')
-                    b = U.GetDlgItem(err[0], 1) or U.GetDlgItem(err[0], 2)
-                    if b:
-                        U.SendMessageW(b, BM_CLICK, 0, None)
-                    time.sleep(0.5)
-                    break
+                    self.log(f'  [dialog "{_title(d)}"] retry {k + 1}: {dialog_text(err[0], allow_clipboard=False)[:80]}')
+                    self._close_box(err[0])
+                    self._goto_folder(d, ed, ok, path)       # the dialog dropped the folder part:
+                    break                                    # open the folder, then the bare name
                 time.sleep(0.1)
             else:
                 return True                                  # still open but no complaint: next step decides
         return False
+
+    def _close_box(self, box):
+        if not click_ok(box):
+            b = U.GetDlgItem(box, 1) or U.GetDlgItem(box, 2)
+            if b:
+                U.SendMessageW(b, BM_CLICK, 0, None)
+        t = time.time()
+        while U.IsWindow(box) and U.IsWindowVisible(box) and time.time() - t < 3:
+            time.sleep(0.1)
+        if U.IsWindow(box) and U.IsWindowVisible(box):
+            U.PostMessageW(box, 0x0010, 0, 0)                # WM_CLOSE
+            time.sleep(0.5)
+
+    def _goto_folder(self, d, ed, ok, path):
+        """type the folder and confirm: a Windows file dialog opens it instead of returning"""
+        folder = os.path.dirname(path)
+        U.SendMessageW(ed, WM_SETTEXT, 0, ctypes.c_wchar_p(folder))
+        time.sleep(0.4)
+        U.SendMessageW(ok, BM_CLICK, 0, None)
+        time.sleep(1.5)
 
     def _recover(self):
         """The previous dialog answered late with a 'file not found' box (seen on loaded machines):
@@ -352,15 +372,13 @@ class DialogDriver(threading.Thread):
         if not err:
             return False
         self.log(f'  [dialog "{_title(d)}"] late complaint, entering the path again: {dialog_text(err[0], allow_clipboard=False)[:60]}')
-        b = U.GetDlgItem(err[0], 1) or U.GetDlgItem(err[0], 2)
-        if b:
-            U.SendMessageW(b, BM_CLICK, 0, None)
-        time.sleep(0.8)
+        self._close_box(err[0])
+        self._goto_folder(d, ed, ok, path)
         self.recoveries = getattr(self, 'recoveries', 0) + 1
         if self.recoveries > 4:
             self.last = None
             return False
-        self._enter(d, ed, ok, path)
+        self._enter(d, ed, ok, path, start=1)
         return True
 
     def run(self):
