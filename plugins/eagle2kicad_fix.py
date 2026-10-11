@@ -1880,6 +1880,8 @@ def verify_geometry(pcb_path, ebrd):
             n_plating += 1
             if n_plating <= 10: hole_issues.append(f'{what}: hole {d:g} mm is {"PLATED" if plated else "NON-plated"} in Eagle, '
                                               f'{"plated" if near[0][3] else "NON-plated"} in KiCad')
+    n_inner_pad = eagle_inner_round_pads(pcb_path, ebrd, True, quiet=True) or 0
+    R.p(f'**Through-hole pads on inner layers**: {n_inner_pad} not round / not at the EAGLE inner restring')
     zo = eagle_zone_outlines(pcb_path, ebrd, True, quiet=True)
     n_pour_outline = len(zo) if zo is not None else 0
     R.p(f'**Eagle polygons vs KiCad zone outlines**: {n_pour_outline} zones whose outline differs from the EAGLE contour'
@@ -1891,7 +1893,7 @@ def verify_geometry(pcb_path, ebrd):
     for s_ in hole_issues:
         R.p('  ' + s_)
     GEOM_LOG.append(dict(moved=n_pos, side=n_side, rot=n_rot, val=n_val, padpos=n_padpos, padmiss=n_padmiss,
-                         plating=n_plating, holes_missing=n_hole_miss, pour_outline=n_pour_outline,
+                         plating=n_plating, holes_missing=n_hole_miss, pour_outline=n_pour_outline, inner_pad=n_inner_pad,
                          padsize=n_padsize, drill=n_paddrill, length=n_len, via=n_via, poly=n_poly,
                          missing_parts=n_missp, extra=len(extra), outline=int(outline_bad), outline_invalid=outline_invalid, unrouted=unrouted_bad,
                          layers=layers_bad))
@@ -2116,7 +2118,10 @@ def eagle_zone_outlines(pcb_path, ebrd, dry, quiet=False):
                 if abs(a_new - a_old) > max(0.5, 0.002 * a_new) or holes_new != holes_old:
                     fixed.append((sig.get('name'), pg.get('layer'), round(a_old - a_new, 1), holes_old, holes_new))
                     if not dry:
-                        z.SetOutline(sp); z.UnFill()
+                        zo = z.Outline()                # copy into the zone's own outline: SetOutline() takes
+                        zo.RemoveAllContours()          # ownership of a Python-owned object (crash on save)
+                        zo.Append(sp)
+                        z.UnFill()
         out(f'{checked} EAGLE polygons matched to KiCad zones, {len(fixed)} outlines rebuilt from the EAGLE contour'
             + (f', {unmatched} polygons without a matching zone' if unmatched else ''))
         for net, lay, da, ho, hn in fixed[:20]:
@@ -2126,6 +2131,58 @@ def eagle_zone_outlines(pcb_path, ebrd, dry, quiet=False):
         return fixed
     except Exception as ex:
         out(f'zone outline step failed ({ex}) - left as imported')
+        return None
+
+
+def eagle_inner_round_pads(pcb_path, ebrd, dry, quiet=False):
+    """EAGLE draws every through-hole pad ROUND on the inner layers (square / octagon / long shapes
+    apply to the outer layers only), with the inner restring rule. KiCad's importer keeps the outer
+    shape on every layer: octagon corners reach into the inner pour / neighbouring tracks (found by the
+    Gerber comparison). The pad gets a front/inner/back padstack with a round inner shape."""
+    out = (lambda *a: None) if quiet else R.p
+    if not quiet:
+        R.h('PCB: through-hole pads on inner layers (EAGLE: always round)')
+    try:
+        import pcbnew
+        rules, _ = eagle_brd_rules(ebrd)
+        g = lambda k, d: _unit(rules.get(k)) if rules.get(k) else d
+        ring_in = (float(rules.get('rvPadInner', '0.25') or 0.25), g('rlMinPadInner', 0.254), g('rlMaxPadInner', 0.508))
+        board = pcbnew.LoadBoard(pcb_path)
+        if board.GetCopperLayerCount() <= 2:
+            out('2-layer board - nothing to do'); return 0
+        IN = pcbnew.PADSTACK.INNER_LAYERS
+        bad = []
+        for fp in board.GetFootprints():
+            for pad in fp.Pads():
+                if pad.GetAttribute() != pcbnew.PAD_ATTRIB_PTH or pad.GetDrillSize().x <= 0:
+                    continue
+                dr = min(pad.GetDrillSize().x, pad.GetDrillSize().y) / 1e6
+                sz = pad.GetSize(pcbnew.F_Cu)
+                # inner layers: restring rule only, the library diameter applies to the outer layers
+                want = eagle_pad_diameter(dr, 0.0, ring_in)
+                ish, isz = pad.GetShape(IN), pad.GetSize(IN)
+                ok = ish == pcbnew.PAD_SHAPE_CIRCLE and abs(isz.x / 1e6 - want) < 0.005
+                if ok:
+                    continue
+                bad.append(f'{fp.GetReference()}.{pad.GetNumber()}')
+                if not dry:
+                    ps = pad.Padstack()
+                    if ps.Mode() == pcbnew.PADSTACK.MODE_NORMAL:
+                        shp, siz = pad.GetShape(pcbnew.F_Cu), pad.GetSize(pcbnew.F_Cu)
+                        ps.SetMode(pcbnew.PADSTACK.MODE_FRONT_INNER_BACK)
+                        pad.SetPadstack(ps)
+                        for L in (pcbnew.F_Cu, pcbnew.B_Cu):
+                            pad.SetShape(L, shp); pad.SetSize(L, siz)
+                    d = int(round(want * 1e6))
+                    pad.SetShape(IN, pcbnew.PAD_SHAPE_CIRCLE)
+                    pad.SetSize(IN, pcbnew.VECTOR2I(d, d))
+        out(f'{len(bad)} through-hole pads get a round inner-layer shape (EAGLE inner restring)'
+            + (': ' + ', '.join(bad[:12]) + (' ...' if len(bad) > 12 else '') if bad else ''))
+        if bad and not dry:
+            pcbnew.SaveBoard(pcb_path, board)
+        return len(bad)
+    except Exception as ex:
+        out(f'inner pad step failed ({ex}) - left as imported')
         return None
 
 
@@ -3939,6 +3996,7 @@ def main():
             trim_empty_inner_layers(pcb, ebrd, a.dry_run)
             untent_large_vias(pcb, ebrd, a.dry_run)
             eagle_zone_outlines(pcb, ebrd, a.dry_run)
+            eagle_inner_round_pads(pcb, ebrd, a.dry_run)
             add_milling(pcb, ebrd, a.dry_run)
             plated_milling_slots(pcb, a.dry_run)
         assign_orphan_pads(pcb, a.dry_run)
