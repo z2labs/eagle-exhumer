@@ -15,6 +15,7 @@ if os.name == 'nt':
     EnumProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
     U.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPVOID]
     U.SendMessageW.restype = ctypes.c_ssize_t
+    U.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]; U.GetWindow.restype = wintypes.HWND
     TDM_CLICK_BUTTON, IDOK = 0x0400 + 102, 1
 
 # KiCad messages that are known to be harmless during the EAGLE import and may be confirmed
@@ -344,11 +345,13 @@ class DialogDriver(threading.Thread):
         d, ed, ok, path = self.last
         if not U.IsWindow(d) or not U.IsWindowVisible(d):
             return False
+        name = os.path.basename(path).lower()
         err = [x for x in _dialogs(self.pid) if x != d and x not in self.seen and not _name_edit(x)
-               and os.path.basename(path).lower() in dialog_text(x, allow_clipboard=False).lower()]
+               and (U.GetWindow(x, 4) == d                    # GW_OWNER: a box the file dialog opened
+                    or name in dialog_text(x, allow_clipboard=False).lower())]
         if not err:
             return False
-        self.log(f'  [dialog "{_title(d)}"] late complaint, entering the path again: {dialog_text(err[0])[:60]}')
+        self.log(f'  [dialog "{_title(d)}"] late complaint, entering the path again: {dialog_text(err[0], allow_clipboard=False)[:60]}')
         b = U.GetDlgItem(err[0], 1) or U.GetDlgItem(err[0], 2)
         if b:
             U.SendMessageW(b, BM_CLICK, 0, None)
