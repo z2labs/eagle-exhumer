@@ -1682,8 +1682,19 @@ def verify_geometry(pcb_path, ebrd):
             n_poly += 1
             if n_poly <= 10: issues.append(f'net `{n}` has {e_poly[n]} Eagle polygon(s), no KiCad zone')
     # 3. outline
-    e_out = sum(_eagle_wire_len(w) for w in brd.findall('plain/wire') if w.get('layer') == '20')
-    e_out += sum(2 * math.pi * float(c.get('radius')) for c in brd.findall('plain/circle') if c.get('layer') == '20')
+    # duplicate Dimension items (the same wire drawn twice) are one cut: KiCad's importer merges them
+    def _wkey(w):
+        a = (round(float(w.get('x1')), 4), round(float(w.get('y1')), 4))
+        b = (round(float(w.get('x2')), 4), round(float(w.get('y2')), 4))
+        c = round(float(w.get('curve') or 0), 3)
+        return (a, b, c) if a <= b else (b, a, -c)
+    _seen = set(); dim_wires = []
+    for w in brd.findall('plain/wire'):
+        if w.get('layer') == '20' and _wkey(w) not in _seen:
+            _seen.add(_wkey(w)); dim_wires.append(w)
+    dim_circles = {(c.get('x'), c.get('y'), c.get('radius')) for c in brd.findall('plain/circle') if c.get('layer') == '20'}
+    e_out = sum(_eagle_wire_len(w) for w in dim_wires)
+    e_out += sum(2 * math.pi * float(r) for _, _, r in dim_circles)
     # outline drawn inside packages (enclosure packages): counts too, once per placed element
     pk20 = {}
     for lib in brd.findall('libraries/library'):
@@ -1761,7 +1772,20 @@ def verify_geometry(pcb_path, ebrd):
         outline_ok = False
     outline_invalid = int(bool(e_out) and not outline_ok)
     if outline_invalid:
-        issues.append('KiCad board outline is not a valid closed polygon (DRC invalid_outline)')
+        # an outline that is already open in the EAGLE source (dangling Dimension wire) is copied
+        # faithfully - reported, not failed: the designer has to close it in either tool
+        from collections import Counter as _C
+        deg = _C()
+        for w in dim_wires:
+            for k in (('x1', 'y1'), ('x2', 'y2')):
+                deg[(round(float(w.get(k[0])), 3), round(float(w.get(k[1])), 3))] += 1
+        dangling = sorted(p_ for p_, n_ in deg.items() if n_ % 2)
+        if dangling:
+            outline_invalid = 0
+            R.p(f'WARNING: the EAGLE board outline itself is open ({len(dangling)} dangling Dimension wire ends, '
+                f'e.g. {dangling[0]}) - KiCad reproduces it; close the outline before manufacturing')
+        else:
+            issues.append('KiCad board outline is not a valid closed polygon (DRC invalid_outline)')
     # 4. copper connectivity WITH filled pours vs the Eagle file's own airwires (layer 19):
     #    KiCad must not be less connected than the Eagle source (catches pours that do not fill)
     e_air = sum(1 for s_ in brd.findall('signals/signal') for w in s_.findall('wire') if w.get('layer') == '19')
@@ -2165,6 +2189,28 @@ def _set_pad_layer_props(pad, L, props):
                 getattr(pad, 'Set' + k)(L, props[k])
             except Exception:
                 pass
+
+
+def edge_text_to_drawing(pcb_path, dry):
+    """EAGLE designs often label the Dimension layer (panel notes, 'V-score'). KiCad's importer puts
+    that text on Edge.Cuts, where it is cut geometry: DRC invalid_outline and a broken board
+    polygon. The text goes to User.Drawings, the outline keeps only the cuts."""
+    R.h('PCB: text on the board outline layer -> User.Drawings')
+    try:
+        import pcbnew
+        board = pcbnew.LoadBoard(pcb_path)
+        txt = [d for d in board.GetDrawings() if d.GetLayer() == pcbnew.Edge_Cuts
+               and d.GetClass() in ('PCB_TEXT', 'PCB_TEXTBOX')]
+        R.p(f'{len(txt)} text item(s) moved from Edge.Cuts to User.Drawings'
+            + (': ' + ', '.join(repr(t.GetText()[:20]) for t in txt[:6]) if txt else ''))
+        if txt and not dry:
+            for t in txt:
+                t.SetLayer(pcbnew.Dwgs_User)
+            pcbnew.SaveBoard(pcb_path, board)
+        return len(txt)
+    except Exception as ex:
+        R.p(f'edge text step failed ({ex}) - left as imported')
+        return None
 
 
 def eagle_inner_round_pads(pcb_path, ebrd, dry, quiet=False):
@@ -3731,6 +3777,7 @@ def selftest(d, proj, cli, esch, ebrd):
     # named by a label are avoided; if there is no other choice, those labels are renamed too -
     # otherwise the injection would be a no-op, not a fault.
     sch_done = None
+    f6_effect = True
     sheets_st = [Sheet(f) for f in sorted(glob.glob(os.path.join(tmp, '*.kicad_sch')))]
     lab_names = Counter(str(x[1]) for sh in sheets_st for t in ('label', 'global_label', 'hierarchical_label')
                         for x in kids(sh.tree, t))
@@ -3780,6 +3827,13 @@ def selftest(d, proj, cli, esch, ebrd):
             net, _ = kicad_sch_netlist(cli, os.path.join(tmp, proj + '.kicad_sch'), tmp)
             if net is not None:
                 compare_nets(eagle_sch_truth(esch), net, 'selftest sch')
+                if sch_done:
+                    tag = sch_done[2] + '_SELFTEST'
+                    try:
+                        f6_effect = any(tag in str(k) for k in (net.keys() if hasattr(net, 'keys') else net)) \
+                            or tag in str(net)
+                    except Exception:
+                        f6_effect = True
     finally:
         VIEW.close(); VIEW = old_view
         R.lines[:] = saved
@@ -3796,10 +3850,19 @@ def selftest(d, proj, cli, esch, ebrd):
         'schnet': any(LAST_CMP.get('selftest sch', {}).get(k) for k in ('short', 'open', 'renamed')),
     }
     ok = True
+    na = set()
+    if not caught.get('schnet') and not f6_effect:
+        # the renamed supply never reached the netlist (named by another source, e.g. a hidden power
+        # pin): the injection was a no-op, not a fault the verifier could have seen
+        na.add('schnet')
     for name, key, where in results:
+        if key in na:
+            R.p(f"N/A     {name} {('[' + where + ']') if where else ''} - injection had no effect on the netlist")
+            continue
         hit = caught.get(key)
         ok &= bool(hit)
         R.p(f"{'CAUGHT ' if hit else 'MISSED '} {name} {('[' + where + ']') if where else ''}")
+    results = [r for r in results if r[1] not in na]
     shutil.rmtree(tmp, ignore_errors=True)
     R.p(f'selftest: {sum(1 for _, k, _ in results if caught.get(k))}/{len(results)} injected faults caught'
         + ('' if ok else '  ** VERIFIER NOT TRUSTWORTHY **'))
@@ -4037,6 +4100,7 @@ def main():
             untent_large_vias(pcb, ebrd, a.dry_run)
             eagle_zone_outlines(pcb, ebrd, a.dry_run)
             eagle_inner_round_pads(pcb, ebrd, a.dry_run)
+            edge_text_to_drawing(pcb, a.dry_run)
             add_milling(pcb, ebrd, a.dry_run)
             plated_milling_slots(pcb, a.dry_run)
         assign_orphan_pads(pcb, a.dry_run)
