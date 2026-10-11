@@ -346,6 +346,9 @@ def main():
             except EagleBinaryError as ex:
                 log(f'SKIP {label}: binary EAGLE conversion failed: {ex}')
                 rows.append((label, 'SKIP', f'binary conversion failed: {ex}', {})); continue
+            except Exception as ex:                   # never let one design stop the batch
+                log(f'FAIL {label}: binary EAGLE conversion error: {type(ex).__name__}: {ex}')
+                rows.append((label, 'FAIL', f'binary conversion error: {ex}', {})); continue
             sch, brd = mapping.get(sch, sch), mapping.get(brd, brd)
         else:
             binfo = None

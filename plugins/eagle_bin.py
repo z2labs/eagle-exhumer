@@ -36,6 +36,7 @@ This file is part of Eagle Exhumer (GPL-3.0). Not affiliated with Autodesk.
 """
 
 import math
+import re
 import struct
 import sys
 import xml.etree.ElementTree as ET
@@ -166,11 +167,16 @@ class Strings:
         return bases
 
 
+_XML_BAD = re.compile('[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]')
+
+
 def _dec(b):
+    """record string -> text; control characters (not allowed in XML 1.0) are dropped"""
     try:
-        return b.decode('utf-8')
+        t = b.decode('utf-8')
     except UnicodeDecodeError:
-        return b.decode('cp1252', errors='replace')
+        t = b.decode('cp1252', errors='replace')
+    return _XML_BAD.sub('', t)
 
 
 class BinaryDrawing:
