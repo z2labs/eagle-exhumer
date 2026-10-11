@@ -786,6 +786,9 @@ def layer_key(path, function=''):
             '.gml': 'outline', '.gko': 'outline', '.gm1': 'outline'}
     if ext in prot:
         return prot[ext]
+    m = re.match(r'\.g(\d+)l$', ext)               # .g2l .. .g15l = EAGLE inner layer n (resolved in collect)
+    if m and 2 <= int(m.group(1)) <= 15:
+        return f'cu:E{int(m.group(1))}'
     m = re.match(r'\.g(?:l)?(\d+)$', ext)          # .g2 / .gl2 = inner copper layer 2 (1-based incl. top)
     if m and int(m.group(1)) >= 2:
         return f'cu:in{int(m.group(1)) - 1}'
@@ -858,6 +861,28 @@ def looks_like_mfg(path):
     return False
 
 
+MFG_ROOTS_ENV = 'EAGLE_EXHUMER_MFG_ROOT'
+
+
+def find_mfg_root(eagle_file, roots=None):
+    """reference set in a manufacturing-file library (EAGLE_EXHUMER_MFG_ROOT, ';'-separated): a
+    sub-folder <root>/<set>/<board stem>/ - e.g. the eagle-exhumer-testdata eagle77_cam tree"""
+    roots = roots if roots is not None else [r for r in os.environ.get(MFG_ROOTS_ENV, '').split(';') if r]
+    stem = os.path.splitext(os.path.basename(eagle_file))[0].lower()
+    for root in roots:
+        try:
+            for st in os.listdir(root):
+                d = os.path.join(root, st)
+                if not os.path.isdir(d) or st.startswith('_'):
+                    continue
+                for b in os.listdir(d):
+                    if b.lower() == stem and looks_like_mfg(os.path.join(d, b)):
+                        return os.path.join(d, b)
+        except OSError:
+            continue
+    return None
+
+
 def find_mfg(eagle_file):
     """Manufacturing files next to the EAGLE design (same folder, its parent, or a CAM/MFG/Gerber
     sub-folder / zip of either): the newest candidate, or None."""
@@ -877,7 +902,7 @@ def find_mfg(eagle_file):
                 if looks_like_mfg(p):
                     cands.append(p)
     cands.sort(key=lambda p: (stem in os.path.basename(p).lower(), 'eagle' in os.path.basename(p).lower(), os.path.getmtime(p)), reverse=True)
-    return cands[0] if cands else None
+    return cands[0] if cands else find_mfg_root(eagle_file)   # factory files first, then the library
 
 
 def collect(dirpath, geo):
@@ -910,6 +935,9 @@ def collect(dirpath, geo):
         for n in ls:
             g = layers.pop(f'cu:L{n}')
             layers['cu:top' if n == 1 else 'cu:bot' if n == ls[-1] else f'cu:in{n - 1}'] = g
+    le_ = sorted(int(k[4:]) for k in layers if k.startswith('cu:E'))
+    for i, n in enumerate(le_):                     # EAGLE inner layers by number -> KiCad In1.. in stack order
+        layers[f'cu:in{i + 1}'] = layers.pop(f'cu:E{n}')
     ref = layers.get('outline') or layers.get('cu:top') or layers.get('cu:bot')
     seen = set()
     for p, hs in dfiles:
