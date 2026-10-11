@@ -87,6 +87,12 @@ SUBSECTIONS = {
     0x3a: [(2, 2, 'R')],
 }
 
+# top-level groups whose children are all of one record type (fallback when a counter is off)
+TYPED_GROUPS = {
+    0x14: [{0x15}, {0x1a}],                         # schematic: libraries, sheets
+    0x1b: [{0x15}, None, {0x2e}, {0x1c}],           # board: libraries, plain, elements, signals
+}
+
 KNOWN_TYPES = set(range(0x10, 0x15)) | {0x15, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
                                          0x21, 0x22, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c,
                                          0x2d, 0x2e, 0x2f, 0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37,
@@ -94,7 +100,7 @@ KNOWN_TYPES = set(range(0x10, 0x15)) | {0x15, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c
 
 
 class Rec:
-    __slots__ = ('t', 'idx', 'raw', 'groups', 'f')
+    __slots__ = ('t', 'idx', 'raw', 'groups', 'f', 'attrs')
 
     def __init__(self, t, idx, raw):
         self.t = t
@@ -102,6 +108,7 @@ class Rec:
         self.raw = raw
         self.groups = []
         self.f = {}
+        self.attrs = []
 
     @property
     def kids(self):
@@ -225,7 +232,13 @@ class BinaryDrawing:
                 raise EagleBinaryError('unknown record type 0x%02x at record %d' % (t, i))
             node = Rec(t, i, raw)
             pos[0] += 1
-            for (o, ln, mode) in SUBSECTIONS.get(t, ()):
+            if t in TYPED_GROUPS and pos[0] < n and d[pos[0] * 24] == 0x42:
+                # EAGLE 5.x: global attributes (0x42) right after the schematic / board record,
+                # outside every subtree counter
+                node.attrs = []
+                while pos[0] < n and d[pos[0] * 24] == 0x42:
+                    node.attrs.append(rd())
+            for gi, (o, ln, mode) in enumerate(SUBSECTIONS.get(t, ())):
                 cnt = int.from_bytes(raw[o:o + ln], 'little')
                 grp = []
                 if mode == 'T':
@@ -233,15 +246,36 @@ class BinaryDrawing:
                     mode = 'R'
                 if mode == 'D':
                     for _ in range(cnt):
+                        if t == 0x1b and gi == 1 and pos[0] < n and d[pos[0] * 24] == 0x2e:
+                            # EAGLE 5.x: the plain counter can include the first elements - an
+                            # element never belongs to the plain drawing
+                            self.warnings.append('record %d (0x1b): plain counter %d, elements start after %d'
+                                                 % (i, cnt, len(grp)))
+                            break
                         grp.append(rd())
                 else:
+                    start = pos[0]
                     end = pos[0] + cnt
-                    if end > n:
-                        raise EagleBinaryError('record %d (0x%02x) subtree exceeds the file' % (i, t))
-                    while pos[0] < end:
-                        grp.append(rd())
-                    if pos[0] != end:
-                        raise EagleBinaryError('record %d (0x%02x) subtree size mismatch' % (i, t))
+                    allowed = TYPED_GROUPS.get(t, [None] * 8)[gi]
+                    try:
+                        if end > n:
+                            raise EagleBinaryError('record %d (0x%02x) subtree exceeds the file' % (i, t))
+                        while pos[0] < end:
+                            grp.append(rd())
+                        if pos[0] != end:
+                            raise EagleBinaryError('record %d (0x%02x) subtree size mismatch' % (i, t))
+                    except EagleBinaryError:
+                        if not allowed:
+                            raise
+                        # some EAGLE 5.x files carry a top-level counter that does not match the
+                        # records (e.g. element counted with all attribute slots): read this group
+                        # by record type instead - its children are all of one known type
+                        pos[0] = start
+                        grp = []
+                        while pos[0] < n and d[pos[0] * 24] in allowed:
+                            grp.append(rd())
+                        self.warnings.append('record %d (0x%02x): group %d counter %d, read %d records by type'
+                                             % (i, t, gi, cnt, pos[0] - start))
                 node.groups.append(grp)
             return node
 
@@ -380,6 +414,8 @@ class BinaryDrawing:
             f.update(layer=r.u8(3), x1=r.i32(4), y1=r.i32(8), x2=r.i32(12), y2=r.i32(16),
                      columns=struct.unpack_from('<b', r.raw, 20)[0], rows=struct.unpack_from('<b', r.raw, 21)[0],
                      borders=r.u8(22) & 0x0f)
+        for k in r.attrs:
+            self._decode(k)
         for g in r.groups:
             for k in g:
                 self._decode(k)
