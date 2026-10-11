@@ -297,7 +297,7 @@ class DialogDriver(threading.Thread):
         # screen does not flicker (frames that existed before - manager, progress window - stay)
         self.minimize_frames = minimize_frames
         self.old_frames = set(_top_windows(self.pid))
-        self.done = []
+        self.done, self.last = [], None
         self.messages = []            # [(title, text, action)] every KiCad message box seen
         self.stop_flag = False
 
@@ -322,7 +322,7 @@ class DialogDriver(threading.Thread):
                 continue
             U.SendMessageW(ok, BM_CLICK, 0, None)
             t1 = time.time()
-            while time.time() - t1 < 3.0:
+            while time.time() - t1 < 10.0:                 # loaded machine: the complaint can take seconds
                 if not U.IsWindow(d) or not U.IsWindowVisible(d):
                     return True                              # the dialog closed: path accepted
                 err = [x for x in _dialogs(self.pid) if x != d and x not in self.seen and not _name_edit(x)]
@@ -337,6 +337,28 @@ class DialogDriver(threading.Thread):
             else:
                 return True                                  # still open but no complaint: next step decides
         return False
+
+    def _recover(self):
+        """The previous dialog answered late with a 'file not found' box (seen on loaded machines):
+        close the box and enter that path again."""
+        d, ed, ok, path = self.last
+        if not U.IsWindow(d) or not U.IsWindowVisible(d):
+            return False
+        err = [x for x in _dialogs(self.pid) if x != d and x not in self.seen and not _name_edit(x)
+               and os.path.basename(path).lower() in dialog_text(x, allow_clipboard=False).lower()]
+        if not err:
+            return False
+        self.log(f'  [dialog "{_title(d)}"] late complaint, entering the path again: {dialog_text(err[0])[:60]}')
+        b = U.GetDlgItem(err[0], 1) or U.GetDlgItem(err[0], 2)
+        if b:
+            U.SendMessageW(b, BM_CLICK, 0, None)
+        time.sleep(0.8)
+        self.recoveries = getattr(self, 'recoveries', 0) + 1
+        if self.recoveries > 4:
+            self.last = None
+            return False
+        self._enter(d, ed, ok, path)
+        return True
 
     def run(self):
         for path in self.steps:
@@ -355,11 +377,14 @@ class DialogDriver(threading.Thread):
                         self.seen.discard(d)                 # not accepted: try this dialog again
                         continue
                     self.log(f'  [dialog "{_title(d)}"] <- {path}')
+                    self.last = (d, ed, ok, path)
                     self.done.append(path)
                     handled = True
                     break
                 if handled:
                     break
+                if self.last and self._recover():
+                    continue
                 self._minimize_new()
                 time.sleep(0.15)
             if not handled:
