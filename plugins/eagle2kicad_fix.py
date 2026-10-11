@@ -1287,6 +1287,34 @@ def _fp_copper_polys_to_pads(fp):
     return n
 
 
+def eagle_stop_frame(rules, size):
+    """Eagle's solder-mask expansion for an object of the given size: mvStopFrame*size, limited to
+    [mlMinStopFrame, mlMaxStopFrame]; with crossed limits (min > max) the upper limit wins - this is
+    what the EAGLE Gerbers show (pads of 12 Olimex boards)."""
+    g = lambda k, d: _unit(rules.get(k)) if rules.get(k) else d
+    mv = float(rules.get('mvStopFrame', '1') or 1)
+    return min(g('mlMaxStopFrame', 0.1016), max(g('mlMinStopFrame', 0.1016), mv * size))
+
+
+def _npth_mask(tree, rules):
+    """Eagle opens the solder mask over a <hole> by its stop frame; KiCad's importer leaves the NPTH
+    pad without a mask margin (opening = drill): 0.1 mm smaller on every side (Gerber comparison)."""
+    n = 0
+    for fp in kids(tree, 'footprint'):
+        for p in kids(fp, 'pad'):
+            if len(p) > 2 and str(p[2]) == 'np_thru_hole' and kid(p, 'solder_mask_margin') is None:
+                dr = kid(p, 'drill')
+                ds = [float(x) for x in (dr[1:] if dr else []) if not isinstance(x, list) and x != 'oval']
+                if not ds:
+                    continue
+                m = eagle_stop_frame(rules, min(ds))
+                if m > 0:
+                    lay = kid(p, 'layers')
+                    p.insert(p.index(lay) + 1 if lay in p else len(p), ['solder_mask_margin', f'{m:g}'])
+                    n += 1
+    return n
+
+
 def _npth_no_copper(fp):
     """Eagle <hole>: KiCad's importer gives the NPTH pad a copper size > drill on *.Cu, i.e. a
     net-less copper ring -> 'shorting items' with every track/pad it touches. Size := drill."""
@@ -1969,10 +1997,25 @@ def untent_large_vias(pcb_path, ebrd, dry):
         hit = [v for v in board.GetTracks() if v.GetClass() == 'PCB_VIA' and v.GetDrillValue() / 1e6 > lim + 1e-6]
         R.p(f'EAGLE via stop limit {lim:.3f} mm: {len(hit)} via(s) with a larger drill get a solder-mask opening'
             + (f" ({', '.join(sorted({f'{v.GetDrillValue() / 1e6:g} mm' for v in hit}))})" if hit else ''))
+        if hit:
+            # Eagle opens them by the via diameter plus its stop frame; KiCad uses the board-wide
+            # solder-mask expansion for vias (every pad carries its own margin from the importer)
+            rules = {p_.get('name'): p_.get('value') for p_ in root.iter('param')}
+            def _w(v):
+                try:
+                    return v.GetWidth(pcbnew.F_Cu)
+                except TypeError:
+                    return v.GetWidth()
+            fr = eagle_stop_frame(rules, min(_w(v) for v in hit) / 1e6)
+            R.p(f'  their mask opening: via diameter + {fr:g} mm (EAGLE stop frame, board solder-mask expansion)')
         if hit and not dry:
             for v in hit:
                 v.SetFrontTentingMode(pcbnew.TENTING_MODE_NOT_TENTED)
                 v.SetBackTentingMode(pcbnew.TENTING_MODE_NOT_TENTED)
+            try:
+                board.GetDesignSettings().m_SolderMaskExpansion = int(round(fr * 1e6))
+            except Exception as ex:
+                R.p(f'  board solder-mask expansion not set ({ex})')
             pcbnew.SaveBoard(pcb_path, board)
     except Exception as ex:
         R.p(f'via tenting step failed ({ex}) - left as imported')
@@ -2152,11 +2195,13 @@ def fix_pcb_sexpr(pcb_path, sch_refs, dry, ebrd=None):
 
 
     n_pr, pr_uniform = _pad_restring(tree, eagle_brd_rules(ebrd)[0]) if ebrd else (0, True)
+    n_nm = _npth_mask(tree, eagle_brd_rules(ebrd)[0]) if ebrd else 0
     R.p(f'{n_undef} items moved from UNDEFINED layer to Dwgs.User')
     R.p(f'{n_np} NPTH holes: net-less copper ring removed (pad size = drill)')
     R.p(f'{n_cu} package copper polygons -> custom pads with the net of the pad they touch (Eagle polygon-in-package)')
     R.p(f'{n_nt} net-tie pad groups (copper links inside Eagle packages, e.g. board-mounted 0R arrays)')
     R.p(f'{n_via} vias enlarged to Eagle restring (drill + 2 x clamp(rvViaOuter*drill, rlMin, rlMax))')
+    R.p(f'{n_nm} non-plated holes get Eagle\'s solder-mask stop frame (KiCad: none)')
     R.p(f'{n_pr} through-hole pads enlarged to Eagle restring (drill + 2 x clamp(rvPad*drill, rlMinPad, rlMaxPad))'
         + ('' if pr_uniform else ' - NOTE: Eagle top/inner/bottom pad rules differ, the top rule is used on every layer'))
     R.p(f'{n_bo} footprints without schematic symbol marked board_only (holes, logos, fiducials)')
