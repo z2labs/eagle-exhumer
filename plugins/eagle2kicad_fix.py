@@ -1880,12 +1880,18 @@ def verify_geometry(pcb_path, ebrd):
             n_plating += 1
             if n_plating <= 10: hole_issues.append(f'{what}: hole {d:g} mm is {"PLATED" if plated else "NON-plated"} in Eagle, '
                                               f'{"plated" if near[0][3] else "NON-plated"} in KiCad')
+    zo = eagle_zone_outlines(pcb_path, ebrd, True, quiet=True)
+    n_pour_outline = len(zo) if zo is not None else 0
+    R.p(f'**Eagle polygons vs KiCad zone outlines**: {n_pour_outline} zones whose outline differs from the EAGLE contour'
+        + ('' if zo is not None else ' (check failed)'))
+    for net, lay, da, ho, hn in (zo or [])[:10]:
+        R.p(f'  {net} (EAGLE layer {lay}): KiCad zone {da:+g} mm2, holes {ho} vs EAGLE {hn}')
     R.p(f'**Eagle holes vs KiCad holes**: {len(e_holes)} holes ({sum(1 for h in e_holes if h[3])} plated, '
         f'{sum(1 for h in e_holes if not h[3])} non-plated), {n_plating} with the wrong plating, {n_hole_miss} without a KiCad hole')
     for s_ in hole_issues:
         R.p('  ' + s_)
     GEOM_LOG.append(dict(moved=n_pos, side=n_side, rot=n_rot, val=n_val, padpos=n_padpos, padmiss=n_padmiss,
-                         plating=n_plating, holes_missing=n_hole_miss,
+                         plating=n_plating, holes_missing=n_hole_miss, pour_outline=n_pour_outline,
                          padsize=n_padsize, drill=n_paddrill, length=n_len, via=n_via, poly=n_poly,
                          missing_parts=n_missp, extra=len(extra), outline=int(outline_bad), outline_invalid=outline_invalid, unrouted=unrouted_bad,
                          layers=layers_bad))
@@ -2019,6 +2025,108 @@ def untent_large_vias(pcb_path, ebrd, dry):
             pcbnew.SaveBoard(pcb_path, board)
     except Exception as ex:
         R.p(f'via tenting step failed ({ex}) - left as imported')
+
+
+def _eagle_contour(pg, steps_per_rad=12):
+    """EAGLE polygon vertices -> point list (mm, EAGLE frame); a vertex 'curve' is the arc angle (deg,
+    + = CCW) of the edge to the next vertex"""
+    import math
+    vs = [(float(v.get('x')), float(v.get('y')), float(v.get('curve', '0') or 0)) for v in pg.findall('vertex')]
+    out = []
+    for i, (x1, y1, c) in enumerate(vs):
+        x2, y2, _ = vs[(i + 1) % len(vs)]
+        out.append((x1, y1))
+        if abs(c) > 1e-6:
+            a = math.radians(c)
+            ch = math.hypot(x2 - x1, y2 - y1)
+            if ch < 1e-9:
+                continue
+            r = ch / (2 * math.sin(abs(a) / 2))
+            mx, my = (x1 + x2) / 2, (y1 + y2) / 2
+            d = math.sqrt(max(r * r - (ch / 2) ** 2, 0))
+            ux, uy = -(y2 - y1) / ch, (x2 - x1) / ch           # left normal of the chord
+            sgn = 1 if (c > 0) == (abs(c) < 180) else -1
+            cx, cy = mx + sgn * ux * d, my + sgn * uy * d
+            a1 = math.atan2(y1 - cy, x1 - cx)
+            n = max(2, int(abs(a) * steps_per_rad))
+            for k in range(1, n):
+                t = a1 + a * k / n
+                out.append((cx + r * math.cos(t), cy + r * math.sin(t)))
+    return out
+
+
+def eagle_zone_outlines(pcb_path, ebrd, dry, quiet=False):
+    """Every KiCad zone gets its outline rebuilt from the EAGLE polygon contour: the copper edge lies
+    half the polygon wire width outside the contour, and a contour that encloses a cut-out through a
+    narrow slit (a keyhole, EAGLE's way to keep copper out of an area) closes into a real hole once
+    widened. KiCad's importer drops such cut-outs - copper poured under a connector the designer kept
+    free (found by the Gerber comparison: 25 EAGLE vertices, 10 in the KiCad zone, no hole)."""
+    out = (lambda *a: None) if quiet else R.p
+    if not quiet:
+        R.h('PCB: zone outlines vs the EAGLE polygons (cut-outs)')
+    try:
+        import pcbnew
+        brd = eagle_root(ebrd).find('drawing/board')
+        board = pcbnew.LoadBoard(pcb_path)
+        fps = {fp.GetReference(): fp for fp in board.GetFootprints()}
+        offs = sorted((round(fps[kref(e.get('name'))].GetPosition().x / 1e6 - float(e.get('x')), 3),
+                       round(fps[kref(e.get('name'))].GetPosition().y / 1e6 + float(e.get('y')), 3))
+                      for e in brd.findall('elements/element') if kref(e.get('name')) in fps)
+        ox, oy = Counter(offs).most_common(1)[0][0] if offs else (0.0, 0.0)
+        inner = sorted(eagle_inner_layers(brd))
+        def klayer(l):
+            l = int(l)
+            if l == 1: return pcbnew.F_Cu
+            if l == 16: return pcbnew.B_Cu
+            return board.GetLayerID(f'In{inner.index(l) + 1}.Cu') if l in inner else None
+        S = 1e6
+        zones = [z for z in board.Zones() if not z.GetIsRuleArea()]
+        fixed, checked, unmatched = [], 0, 0
+        for sig in brd.findall('signals/signal'):
+            for pg in sig.findall('polygon'):
+                if not pg.get('layer', '').isdigit() or not (1 <= int(pg.get('layer')) <= 16):
+                    continue
+                kl = klayer(pg.get('layer'))
+                pts = _eagle_contour(pg)
+                if kl is None or len(pts) < 3:
+                    continue
+                w = float(pg.get('width') or 0)
+                sp = pcbnew.SHAPE_POLY_SET(); sp.NewOutline()
+                for x, y in pts:
+                    sp.Append(int(round((x + ox) * S)), int(round((-y + oy) * S)))
+                try:
+                    sp.Simplify()
+                except TypeError:
+                    sp.Simplify(pcbnew.SHAPE_POLY_SET.PM_FAST)
+                if w > 0:
+                    sp.Inflate(int(round(w / 2 * S)), pcbnew.CORNER_STRATEGY_CHAMFER_ACUTE_CORNERS, 1000, True)
+                bb = sp.BBox()
+                cand = [z for z in zones if z.GetNetname() == sig.get('name') and z.IsOnLayer(kl)]
+                def dist(z):
+                    zb = z.Outline().BBox()
+                    return max(abs(zb.GetLeft() - bb.GetLeft()), abs(zb.GetTop() - bb.GetTop()),
+                               abs(zb.GetRight() - bb.GetRight()), abs(zb.GetBottom() - bb.GetBottom())) / S
+                cand = sorted(cand, key=dist)
+                if not cand or dist(cand[0]) > 0.3:
+                    unmatched += 1; continue
+                z = cand[0]; zones.remove(z); checked += 1
+                a_new, a_old = sp.Area() / S ** 2, z.Outline().Area() / S ** 2
+                holes_new = sum(sp.HoleCount(i) for i in range(sp.OutlineCount()))
+                holes_old = sum(z.Outline().HoleCount(i) for i in range(z.Outline().OutlineCount()))
+                if abs(a_new - a_old) > max(0.5, 0.002 * a_new) or holes_new != holes_old:
+                    fixed.append((sig.get('name'), pg.get('layer'), round(a_old - a_new, 1), holes_old, holes_new))
+                    if not dry:
+                        z.SetOutline(sp); z.UnFill()
+        out(f'{checked} EAGLE polygons matched to KiCad zones, {len(fixed)} outlines rebuilt from the EAGLE contour'
+            + (f', {unmatched} polygons without a matching zone' if unmatched else ''))
+        for net, lay, da, ho, hn in fixed[:20]:
+            out(f'  {net} (EAGLE layer {lay}): KiCad zone {da:+g} mm2 larger, holes {ho} -> {hn}')
+        if fixed and not dry:
+            pcbnew.SaveBoard(pcb_path, board)
+        return fixed
+    except Exception as ex:
+        out(f'zone outline step failed ({ex}) - left as imported')
+        return None
 
 
 def trim_empty_inner_layers(pcb_path, ebrd, dry):
@@ -3830,6 +3938,7 @@ def main():
         if ebrd:
             trim_empty_inner_layers(pcb, ebrd, a.dry_run)
             untent_large_vias(pcb, ebrd, a.dry_run)
+            eagle_zone_outlines(pcb, ebrd, a.dry_run)
             add_milling(pcb, ebrd, a.dry_run)
             plated_milling_slots(pcb, a.dry_run)
         assign_orphan_pads(pcb, a.dry_run)

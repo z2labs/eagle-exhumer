@@ -55,6 +55,9 @@ class ShapelyGeo:
             return g
         return g.buffer(-r, join_style='mitre').buffer(r, join_style='mitre')
 
+    def grow(self, g, r):
+        return g if g.is_empty or r <= 0 else g.buffer(r, join_style='mitre')
+
     def translate(self, g, dx, dy):
         return self.affinity.translate(g, dx, dy)
 
@@ -135,6 +138,11 @@ class KicadGeo:
     def opening(self, g, r):
         c = self._copy(g)
         c.Deflate(int(r * self.S), self.p.CORNER_STRATEGY_CHAMFER_ALL_CORNERS, 1000)
+        c.Inflate(int(r * self.S), self.p.CORNER_STRATEGY_CHAMFER_ALL_CORNERS, 1000)
+        return c
+
+    def grow(self, g, r):
+        c = self._copy(g)
         c.Inflate(int(r * self.S), self.p.CORNER_STRATEGY_CHAMFER_ALL_CORNERS, 1000)
         return c
 
@@ -224,6 +232,10 @@ class RasterGeo:
         n = max(1, int(round(r / self.px)))
         np = self.np
         return self._shift_min(self._shift_min(g, n, np.logical_and), n, np.logical_or)
+
+    def grow(self, g, r):
+        n = max(1, int(round(r / self.px)))
+        return self._shift_min(g, n, self.np.logical_or)
 
     def bbox(self, g):
         np = self.np
@@ -1031,6 +1043,9 @@ def eagle_pours(brd_path, geo, off=(0.0, 0.0)):
     return {k: geo.union(v) for k, v in out.items()}
 
 
+POUR_EDGE = 1.0      # mm
+
+
 def _frame(parts, bb):
     """a difference spanning the whole board = an outline frame"""
     W, H = bb[2] - bb[0], bb[3] - bb[1]
@@ -1104,7 +1119,12 @@ def compare(eagle_dir, kicad_dir, brd=None, tol=0.03, geo=None, log=print, prefe
             entry['eagle_plots_outline'] = True
             notes.append(f'{k}: the EAGLE CAM job plots the board outline into this layer - outline band ignored')
         if k.startswith('cu:') and k in pours:
-            se, sk = geo.diff(se, pours[k]), geo.diff(sk, pours[k])
+            # a fill difference reaches a little past the EAGLE polygon contour (outline wire width,
+            # neighbouring pours of equal rank, orphan islands): spots within POUR_EDGE of a pour are pour
+            # differences (reported), not copper defects
+            pg = geo.grow(pours[k], POUR_EDGE)
+            se, sk = geo.diff(se, pg), geo.diff(sk, pg)
+            pg = None
         pe = geo.parts(se)
         spots = [t + ('eagle',) for t in pe] + [t + ('kicad',) for t in geo.parts(sk)]
         se = sk = None
