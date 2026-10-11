@@ -365,7 +365,9 @@ def norm_net(name):
     if n.startswith('/'):
         n = n.rsplit('/', 1)[-1]
     n = re.sub(r'~\{([^}]*)\}', r'!\1', n)  # KiCad overbar -> Eagle !..
-    return n.replace('!', '') 
+    # an EAGLE name written with a literal '~' (active-low marker, SparkFun style) becomes a KiCad
+    # overbar '~{..}' on import: the same net
+    return n.replace('!', '').replace('~', '')
 
 def kicad_sch_netlist(cli, root_sch, tmpdir):
     out = os.path.join(tmpdir, 'eaglefix_netlist.xml')
