@@ -653,12 +653,15 @@ def _runs_to_geom(geo, prims, dx, dy):
 # --------------------------------------------------------------------------- Excellon
 
 class Hole(tuple):
-    """(x, y, drill, slot) with .plated: True / False / None (the drill file does not say)"""
+    """(x, y, drill, slot) with .plated: True / False / None (the drill file does not say) and
+    .explicit: coordinates exact (decimal point, or format declared in the header) - not subject to
+    the format guess"""
     plated = None
+    explicit = False
 
 
 def _hole(t, plated):
-    h = Hole(t); h.plated = plated
+    h = Hole(t); h.plated = plated; h.explicit = getattr(t, 'explicit', False)
     return h
 
 
@@ -725,7 +728,10 @@ def read_excellon(path):
                 ex = re.search(r'X([+-]?[\d.]+)', tail); ey = re.search(r'Y([+-]?[\d.]+)', tail)
                 slot = (num(ex.group(1)) if ex else x, num(ey.group(1)) if ey else y)
             if cur in tools:
-                holes.append((x, y, tools[cur], slot))
+                h = Hole((x, y, tools[cur], slot))
+                # exact: decimal point written, or the header declared the format (METRIC,TZ,000.000)
+                h.explicit = bool(fmt or (mx and '.' in mx.group(1)) or (my and '.' in my.group(1)))
+                holes.append(h)
     return holes
 
 
@@ -921,12 +927,23 @@ def collect(dirpath, geo):
 def _fit_drill_scale(hs, b, m=1.0):
     """Excellon files without a format header (old EAGLE: M72 only) are ambiguous in the number of
     decimals: pick the coordinate scale that puts the holes inside the Gerber extent of the same set."""
-    def inside(f):
-        return sum(b[0] - m <= h[0] * f <= b[2] + m and b[1] - m <= h[1] * f <= b[3] + m for h in hs)
-    best = max((1, 0.1, 10, 0.01, 100), key=inside)
-    if inside(best) <= inside(1):
+    amb = [h for h in hs if not getattr(h, 'explicit', False)]   # decimal-point coordinates are exact
+    if not amb:
         return hs, 1
-    return [_hole((h[0] * best, h[1] * best, h[2], None if h[3] is None else (h[3][0] * best, h[3][1] * best)),
+    W, H = b[2] - b[0], b[3] - b[1]
+    xs, ys = [h[0] for h in amb], [h[1] for h in amb]
+    def inside(f):
+        # a scale that shrinks every hole into a corner of the board is no fit: the holes must also
+        # span a good part of the board (a few holes outside the outline - coupons, rails - are fine)
+        if (max(xs) - min(xs)) * f < 0.3 * W and (max(ys) - min(ys)) * f < 0.3 * H:
+            return 0
+        return sum(b[0] - m <= h[0] * f <= b[2] + m and b[1] - m <= h[1] * f <= b[3] + m for h in amb)
+    best = max((1, 0.1, 10, 0.01, 100), key=inside)
+    i1 = inside(1)
+    if i1 >= 0.6 * len(amb) or inside(best) <= i1:
+        return hs, 1
+    return [h if getattr(h, 'explicit', False) else
+            _hole((h[0] * best, h[1] * best, h[2], None if h[3] is None else (h[3][0] * best, h[3][1] * best)),
                   getattr(h, 'plated', None)) for h in hs], best
 
 
