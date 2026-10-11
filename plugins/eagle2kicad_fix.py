@@ -1699,9 +1699,10 @@ def verify_geometry(pcb_path, ebrd):
     pk20 = {}
     for lib in brd.findall('libraries/library'):
         for p in lib.findall('packages/package'):
+            _pw = {_wkey(w): w for w in p.findall('wire') if w.get('layer') == '20'}   # duplicates once
+            _pc = {(c.get('x'), c.get('y'), c.get('radius')) for c in p.findall('circle') if c.get('layer') == '20'}
             pk20[(lib.get('name'), p.get('name'))] = (
-                sum(_eagle_wire_len(w) for w in p.findall('wire') if w.get('layer') == '20')
-                + sum(2 * math.pi * float(c.get('radius')) for c in p.findall('circle') if c.get('layer') == '20'))
+                sum(_eagle_wire_len(w) for w in _pw.values()) + sum(2 * math.pi * float(r) for _, _, r in _pc))
     e_out += sum(pk20.get((e.get('library'), e.get('package')), 0) for e in els)
     def _klen(d):
         # EDA_SHAPE::GetLength() asserts (and aborts kicad-cli python) for circles/rectangles
