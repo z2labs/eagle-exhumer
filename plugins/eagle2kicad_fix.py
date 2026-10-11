@@ -2134,6 +2134,39 @@ def eagle_zone_outlines(pcb_path, ebrd, dry, quiet=False):
         return None
 
 
+_PAD_PROPS = ('Shape', 'Size', 'Offset', 'ChamferRectRatio', 'ChamferPositions', 'RoundRectRadiusRatio')
+
+
+def _pad_layer_props(pad, L):
+    out = {}
+    for k in _PAD_PROPS:
+        try:
+            out[k] = getattr(pad, 'Get' + k)(L)
+        except Exception:
+            pass
+    return out
+
+
+def _pad_props_differ(pcbnew, pf, pb):
+    """outer-layer shapes differ (ratios count only for the shapes that use them)"""
+    sh = pf.get('Shape')
+    keys = ['Shape', 'Size', 'Offset']
+    if sh == pcbnew.PAD_SHAPE_CHAMFERED_RECT:
+        keys += ['ChamferRectRatio', 'ChamferPositions', 'RoundRectRadiusRatio']
+    elif sh == pcbnew.PAD_SHAPE_ROUNDRECT:
+        keys += ['RoundRectRadiusRatio']
+    return [k for k in keys if k in pf and str(pf[k]) != str(pb.get(k))]
+
+
+def _set_pad_layer_props(pad, L, props):
+    for k in _PAD_PROPS:                  # shape first: setting it may reset the dependent values
+        if k in props:
+            try:
+                getattr(pad, 'Set' + k)(L, props[k])
+            except Exception:
+                pass
+
+
 def eagle_inner_round_pads(pcb_path, ebrd, dry, quiet=False):
     """EAGLE draws every through-hole pad ROUND on the inner layers (square / octagon / long shapes
     apply to the outer layers only), with the inner restring rule. KiCad's importer keeps the outer
@@ -2162,17 +2195,24 @@ def eagle_inner_round_pads(pcb_path, ebrd, dry, quiet=False):
                 want = eagle_pad_diameter(dr, 0.0, ring_in)
                 ish, isz = pad.GetShape(IN), pad.GetSize(IN)
                 ok = ish == pcbnew.PAD_SHAPE_CIRCLE and abs(isz.x / 1e6 - want) < 0.005
+                if ok and pad.Padstack().Mode() != pcbnew.PADSTACK.MODE_NORMAL:
+                    # outer layers identical (EAGLE: one pad shape top and bottom)
+                    pf, pb = _pad_layer_props(pad, pcbnew.F_Cu), _pad_layer_props(pad, pcbnew.B_Cu)
+                    ok = not _pad_props_differ(pcbnew, pf, pb)
+                    if not ok and not dry:
+                        _set_pad_layer_props(pad, pcbnew.B_Cu, pf)
                 if ok:
                     continue
                 bad.append(f'{fp.GetReference()}.{pad.GetNumber()}')
                 if not dry:
                     ps = pad.Padstack()
                     if ps.Mode() == pcbnew.PADSTACK.MODE_NORMAL:
-                        shp, siz = pad.GetShape(pcbnew.F_Cu), pad.GetSize(pcbnew.F_Cu)
+                        F = pcbnew.F_Cu
+                        props = _pad_layer_props(pad, F)
                         ps.SetMode(pcbnew.PADSTACK.MODE_FRONT_INNER_BACK)
                         pad.SetPadstack(ps)
-                        for L in (pcbnew.F_Cu, pcbnew.B_Cu):
-                            pad.SetShape(L, shp); pad.SetSize(L, siz)
+                        for L in (pcbnew.F_Cu, pcbnew.B_Cu):   # outer layers keep the full shape (octagon =
+                            _set_pad_layer_props(pad, L, props)  # chamfered rect: ratio + corners too)
                     d = int(round(want * 1e6))
                     pad.SetShape(IN, pcbnew.PAD_SHAPE_CIRCLE)
                     pad.SetSize(IN, pcbnew.VECTOR2I(d, d))

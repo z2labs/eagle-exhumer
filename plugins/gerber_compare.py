@@ -1028,11 +1028,7 @@ def eagle_pours(brd_path, geo, off=(0.0, 0.0)):
         return {}
     import xml.etree.ElementTree as ET
     b = ET.parse(brd_path).getroot().find('drawing/board')
-    # inner layers in stack order: the n-th used EAGLE inner layer (2..15) is KiCad In<n>
-    used = sorted({int(e.get('layer')) for e in b.iter() if e.get('layer', '').isdigit() and 2 <= int(e.get('layer')) <= 15
-                   and e.tag in ('wire', 'polygon', 'smd', 'rectangle', 'circle')})
-    key = {'1': 'cu:top', '16': 'cu:bot'}
-    key.update({str(l): f'cu:in{i + 1}' for i, l in enumerate(used)})
+    key = _cu_keys(b)
     out = defaultdict(list)
     for s in b.findall('signals/signal'):
         for p in s.findall('polygon'):
@@ -1044,6 +1040,49 @@ def eagle_pours(brd_path, geo, off=(0.0, 0.0)):
 
 
 POUR_EDGE = 1.0      # mm
+
+
+def _cu_keys(b):
+    # inner layers in stack order: the n-th used EAGLE inner layer (2..15) is KiCad In<n>
+    used = sorted({int(e.get('layer')) for e in b.iter() if e.get('layer', '').isdigit() and 2 <= int(e.get('layer')) <= 15
+                   and e.tag in ('wire', 'polygon', 'smd', 'rectangle', 'circle')})
+    key = {'1': 'cu:top', '16': 'cu:bot'}
+    key.update({str(l): f'cu:in{i + 1}' for i, l in enumerate(used)})
+    return key
+
+
+def eagle_copper_texts(brd_path, off=(0.0, 0.0)):
+    """{layer key: [(x0, y0, x1, y1)]} rough boxes of EAGLE text on copper layers (vector font, placed
+    and rotated by the anchor, alignment unknown: the box spans both sides of the anchor). KiCad draws its own stroke font."""
+    if not brd_path:
+        return {}
+    import xml.etree.ElementTree as ET
+    b = ET.parse(brd_path).getroot().find('drawing/board')
+    key = dict(_cu_keys(b), **{'29': 'mask:top', '30': 'mask:bot'})   # text drawn into tStop / bStop too
+    out = defaultdict(list)
+    for t in list(b.iter('text')) + [a for a in b.iter('attribute') if a.get('x') and a.get('display') != 'off']:
+        k = key.get(t.get('layer') or '')
+        txt = t.text if t.tag == 'text' else (t.get('value') or '')
+        if not k or not txt or not t.get('x'):
+            continue
+        sz = float(t.get('size') or 1.27)
+        L = len(txt.strip()) * sz * 0.9 + sz + 0.5
+        x, y = float(t.get('x')) + off[0], float(t.get('y')) + off[1]
+        r = float(re.sub(r'[^0-9.]', '', t.get('rot') or '') or 0) % 180
+        a, c = (L, 1.2 * sz + 0.5) if r == 0 else (1.2 * sz + 0.5, L) if r == 90 else (L, L)
+        out[k].append((x - a, y - c, x + a, y + c))
+    return dict(out)
+
+
+def _in_box(s, boxes):
+    return any(x0 <= s[1] <= x1 and y0 <= s[2] <= y1 for x0, y0, x1, y1 in boxes)
+
+
+def _hole_contour(s, holes):
+    """an outline difference that is a circle around a drill hole of the same size: EAGLE CAM plots the
+    <hole> contour on the Dimension layer, KiCad does not (the hole itself is in the drill file)"""
+    D = max(s[3], s[4])
+    return any(abs(h[0] - s[1]) < 0.4 and abs(h[1] - s[2]) < 0.4 and D - 1.1 <= h[2] <= D + 0.3 for h in holes)
 
 
 def _frame(parts, bb):
@@ -1089,6 +1128,7 @@ def compare(eagle_dir, kicad_dir, brd=None, tol=0.03, geo=None, log=print, prefe
     if abs(off[0]) > 0.01 or abs(off[1]) > 0.01:
         notes.append(f'EAGLE CAM frame is offset against the .brd by ({off[0]:.3f}, {off[1]:.3f}) mm ({ov} vias) - pours moved along')
     pours = eagle_pours(brd, geo, off) if brd else {}
+    texts = eagle_copper_texts(brd, off) if brd else {}
     board_bb = geo.bbox(clip(le['outline'].build(geo))) if 'outline' in le else None
     band = None
     for k in sorted(set(le) | set(lk)):
@@ -1133,6 +1173,16 @@ def compare(eagle_dir, kicad_dir, brd=None, tol=0.03, geo=None, log=print, prefe
             inside = [t for t in spots if x0 - 0.5 <= t[1] <= x1 + 0.5 and y0 - 0.5 <= t[2] <= y1 + 0.5]
             entry['outside_board_mm2'] = round(sum(t[0] for t in spots if t not in inside), 3)
             spots = inside
+        if k == 'outline' and he:
+            hc = [t for t in spots if t[5] == 'eagle' and _hole_contour(t, he)]
+            if hc:
+                entry['hole_contours'] = len(hc)
+                spots = [t for t in spots if t not in hc]
+        if k in texts:
+            tx = [t for t in spots if _in_box(t, texts[k])]
+            if tx:
+                entry['text_spots'] = len(tx); entry['text_mm2'] = round(sum(t[0] for t in tx), 3)
+                spots = [t for t in spots if t not in tx]
         entry['spots_mm2'] = round(sum(t[0] for t in spots), 3)
         spots.sort(key=lambda t: -t[0])
         entry['spots'] = [dict(mm2=round(a_, 4), x=round(cx, 3), y=round(cy, 3), w=round(w, 3), h=round(h, 3), only_in=side)
@@ -1186,6 +1236,12 @@ def verdict(res, spot_min=0.05):
         if e.get('significant_in_pours_mm2'):
             pct = 100 * e['significant_in_pours_mm2'] / max(e.get('pour_mm2') or 1, 1)
             warns.append(f"{k}: polygon pour fill differs by {e['significant_in_pours_mm2']:.1f} mm2 ({pct:.1f} % of the pour area)")
+        if e.get('text_spots'):
+            warns.append(f"{k}: {e['text_spots']} differences at EAGLE text on this layer, {e['text_mm2']:.2f} mm2 - "
+                         "vector font differs between the tools (check the text is still legible and clear of other copper)")
+        if e.get('hole_contours'):
+            infos.append(f"{k}: {e['hole_contours']} hole contours plotted by the EAGLE CAM job on the outline layer "
+                         "(the holes themselves are in the drill files)")
         if e.get('outside_board_mm2'):
             infos.append(f"{k}: {e['outside_board_mm2']:.2f} mm2 differ outside the board outline (text / drawings, not manufactured)")
     return fails, warns, infos
