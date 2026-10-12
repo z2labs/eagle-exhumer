@@ -216,8 +216,11 @@ def convert(src, target, timeout, brd=None, method='cli'):
     # private KiCad with an empty scratch project (never the user's projects)
     import tempfile
     ui = get_ui()
-    scratch = os.path.join(tempfile.gettempdir(), 'eagle2kicad_batch_scratch')
-    os.makedirs(scratch, exist_ok=True)
+    scratch = os.path.join(tempfile.gettempdir(), f'eagle2kicad_batch_scratch_{os.getpid()}')   # parallel batches
+    if not os.path.isdir(scratch):
+        os.makedirs(scratch)
+        import atexit
+        atexit.register(shutil.rmtree, scratch, True)
     pro = os.path.join(scratch, 'scratch.kicad_pro')
     if not os.path.isfile(pro):
         with open(pro, 'w') as f:
