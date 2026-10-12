@@ -14,88 +14,163 @@ Run with KiCad's python:
 A folder is searched recursively for Eagle .sch/.brd pairs; binary (EAGLE <= 5.x) files are
 converted to EAGLE XML first (eagle_bin.py). Output: <name>_kicad next to each design, batch_summary.md in the cwd.
 """
-import argparse, ctypes, glob, json, os, re, shutil, subprocess, sys, time
-from ctypes import wintypes
+import argparse, glob, json, os, re, shutil, subprocess, sys, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from win_dialogs import DialogDriver, _dialogs, _title, is_progress, dialog_text as _dialog_text_full  # noqa: E402
 from eagle_bin import is_binary_eagle, EagleBinaryError, prepare_sources as prepare_eagle_sources, summary as eagle_bin_summary  # noqa: E402
 
-U = ctypes.windll.user32
-WM_COMMAND, WM_CLOSE, MF_BYPOSITION = 0x0111, 0x0010, 0x400
-EnumProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+# ------------------------------------------------------------------ GUI backends
+# Both expose: start_kicad, close_kicad, manager, has_eagle_import, import_eagle, dialogs,
+# is_progress, text, title, editors, busy, open_pcb_editor, driver, shutdown.
+
+class WinUI:
+    """Win32: native menu commands (WM_COMMAND), #32770 dialogs, win_dialogs.DialogDriver."""
+
+    def __init__(self, log=print):
+        import ctypes
+        from ctypes import wintypes
+        import win_dialogs as wd
+        self.ct, self.wt, self.wd = ctypes, wintypes, wd
+        self.U = ctypes.windll.user32
+        self.EnumProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        self.p = None
+
+    def kicad_bin(self):
+        for c in [os.path.dirname(sys.executable)] + sorted(glob.glob(r'C:\Program Files\KiCad\*\bin'), reverse=True):
+            if os.path.isfile(os.path.join(c, 'kicad.exe')):
+                return c
+        sys.exit('kicad.exe not found')
+
+    def start_kicad(self, pro):
+        self.p = subprocess.Popen([os.path.join(self.kicad_bin(), 'kicad.exe'), pro])
+        return self.p
+
+    def close_kicad(self):
+        if not self.p:
+            return
+        for h in self.windows():
+            self.U.PostMessageW(h, 0x0010, 0, 0)            # WM_CLOSE
+        try:
+            self.p.wait(20)
+        except subprocess.TimeoutExpired:
+            self.p.kill()                                   # everything is saved; a lingering exit is harmless
+        self.p = None
+
+    def shutdown(self):
+        self.close_kicad()
+
+    def windows(self):
+        out, U, ct = [], self.U, self.ct
+        def cb(h, _):
+            p = self.wt.DWORD(); U.GetWindowThreadProcessId(h, ct.byref(p))
+            if p.value == self.p.pid and U.IsWindowVisible(h) and not U.GetParent(h):
+                out.append(h)
+            return True
+        U.EnumWindows(self.EnumProc(cb), 0)
+        return out
+
+    def menu_items(self, hwnd):
+        """[(id, text, parent)] of every item in the native menu bar (recursive)."""
+        out, U = [], self.U
+        def walk(m):
+            for i in range(U.GetMenuItemCount(m)):
+                b = self.ct.create_unicode_buffer(512)
+                U.GetMenuStringW(m, i, b, 512, 0x400)            # MF_BYPOSITION
+                sub = U.GetSubMenu(m, i)
+                if sub:
+                    walk(sub); out.append((None, b.value, sub))
+                else:
+                    out.append((U.GetMenuItemID(m, i), b.value, m))
+        bar = U.GetMenu(hwnd)
+        if bar:
+            walk(bar)
+        return out
+
+    def eagle_import_id(self, hwnd):
+        """EAGLE entry of the 'Import non-KiCad project' submenu (a submenu listing other CAD formats)."""
+        groups = {}
+        for mid, text, parent in self.menu_items(hwnd):
+            if mid is not None:
+                groups.setdefault(parent, []).append((mid, text.replace('&', '')))
+        for items in groups.values():
+            others = sum(1 for _, t in items if any(k in t.upper() for k in ('ALTIUM', 'CADSTAR', 'EASYEDA', 'GEDA')))
+            if others >= 2:
+                for mid, t in items:
+                    if t.upper().lstrip().startswith('EAGLE') and '\\' not in t and '/' not in t:
+                        return mid
+        return None
+
+    def accel_id(self, hwnd, accel):
+        for mid, text, _ in self.menu_items(hwnd):
+            if mid is not None and text.endswith('\t' + accel):
+                return mid
+        return None
+
+    def manager(self):
+        for h in self.windows():
+            if self.eagle_import_id(h):
+                return h
+        return None
+
+    def import_eagle(self, mgr):
+        self.U.PostMessageW(mgr, 0x0111, self.eagle_import_id(mgr) & 0xFFFF, 0)     # WM_COMMAND
+
+    def open_pcb_editor(self, mgr):
+        pid_ = self.accel_id(mgr, 'Ctrl+P')
+        if pid_:
+            self.U.PostMessageW(mgr, 0x0111, pid_ & 0xFFFF, 0)
+
+    def title(self, h):
+        return self.wd._title(h)
+
+    def dialogs(self):
+        return self.wd._dialogs(self.p.pid)
+
+    def key_of(self, h):
+        return h
+
+    def is_progress(self, d):
+        return self.wd.is_progress(d)
+
+    def text(self, d):
+        """Full message text (Static children, TaskDialog via MSAA, else Ctrl+C) - so a FAIL always
+        says WHAT KiCad complained about, not just the dialog title."""
+        return (self.wd.dialog_text(d) or '(text not readable)')[:600]
+
+    def editors(self, name):
+        mgr = self.manager()
+        return [h for h in self.windows() if h != mgr and name in self.title(h) and self.accel_id(h, 'Ctrl+S')]
+
+    def busy(self):
+        return bool(self.dialogs()) or not all(self.U.IsWindowEnabled(h) for h in self.windows())
+
+    def driver(self, steps, log, layer_mapping, timeout=120):
+        return self.wd.DialogDriver(steps, log=log, layer_mapping=layer_mapping, pid=self.p.pid, timeout=timeout)
 
 
-def kicad_bin():
-    for c in [os.path.dirname(sys.executable)] + sorted(glob.glob(r'C:\Program Files\KiCad\*\bin'), reverse=True):
-        if os.path.isfile(os.path.join(c, 'kicad.exe')):
-            return c
-    sys.exit('kicad.exe not found')
+class LinuxGUI:
+    """Linux: private Xvfb + AT-SPI session (linux_gui.py)."""
+
+    def __new__(cls, log=print):
+        import linux_gui
+        ui = linux_gui.LinuxUI(log=log)
+        ui.driver = lambda steps, log, layer_mapping, timeout=120: linux_gui.DialogDriver(
+            ui, steps, log=log, layer_mapping=layer_mapping, timeout=timeout)
+        return ui
 
 
-# ------------------------------------------------------------------ Win32 helpers
-
-def windows(pid):
-    out = []
-    def cb(h, _):
-        p = wintypes.DWORD(); U.GetWindowThreadProcessId(h, ctypes.byref(p))
-        if p.value == pid and U.IsWindowVisible(h) and not U.GetParent(h):
-            out.append(h)
-        return True
-    U.EnumWindows(EnumProc(cb), 0)
-    return out
+_UI = None
 
 
-def menu_items(hwnd):
-    """[(id, text)] of every item in the native menu bar (recursive)."""
-    out = []
-    def walk(m):
-        for i in range(U.GetMenuItemCount(m)):
-            b = ctypes.create_unicode_buffer(512)
-            U.GetMenuStringW(m, i, b, 512, MF_BYPOSITION)
-            sub = U.GetSubMenu(m, i)
-            if sub:
-                walk(sub)
-                out.append((None, b.value, sub))
-            else:
-                out.append((U.GetMenuItemID(m, i), b.value, m))
-    bar = U.GetMenu(hwnd)
-    if bar:
-        walk(bar)
-    return out
-
-
-def eagle_import_id(hwnd):
-    """EAGLE entry of the 'Import non-KiCad project' submenu (a submenu listing other CAD formats)."""
-    groups = {}
-    for mid, text, parent in menu_items(hwnd):
-        if mid is not None:
-            groups.setdefault(parent, []).append((mid, text.replace('&', '')))
-    for items in groups.values():
-        others = sum(1 for _, t in items if any(k in t.upper() for k in ('ALTIUM', 'CADSTAR', 'EASYEDA', 'GEDA')))
-        if others >= 2:
-            for mid, t in items:
-                if t.upper().lstrip().startswith('EAGLE') and '\\' not in t and '/' not in t:
-                    return mid
-    return None
-
-
-def accel_id(hwnd, accel):
-    for mid, text, _ in menu_items(hwnd):
-        if mid is not None and text.endswith('\t' + accel):
-            return mid
-    return None
-
-
-def title(h):
-    return _title(h)
-
-
-def dialog_text(h):
-    """Full message text (Static children, TaskDialog via MSAA, else Ctrl+C) - so a FAIL always
-    says WHAT KiCad complained about, not just the dialog title."""
-    return (_dialog_text_full(h) or '(text not readable)')[:600]
+def get_ui():
+    global _UI
+    if _UI is None:
+        _UI = WinUI(log) if os.name == 'nt' else LinuxGUI(log)
+        import atexit
+        atexit.register(_UI.shutdown)               # Linux: stops the private X / D-Bus session
+    return _UI
 
 
 def check_lib_table(target, name):
@@ -138,8 +213,10 @@ def convert(src, target, timeout, brd=None, method='cli'):
             os.makedirs(os.path.join(tmp, 'sch'), exist_ok=True)
             gui_src = os.path.join(tmp, 'sch', os.path.basename(src)); shutil.copy2(src, gui_src)
     n_editors = 1 if cli_pcb else 2          # editors the IMPORT opens (schematic only with the cli board)
-    # private kicad.exe with an empty scratch project (never the user's projects)
-    scratch = os.path.join(os.environ.get('TEMP', '.'), 'eagle2kicad_batch_scratch')
+    # private KiCad with an empty scratch project (never the user's projects)
+    import tempfile
+    ui = get_ui()
+    scratch = os.path.join(tempfile.gettempdir(), 'eagle2kicad_batch_scratch')
     os.makedirs(scratch, exist_ok=True)
     pro = os.path.join(scratch, 'scratch.kicad_pro')
     if not os.path.isfile(pro):
@@ -147,63 +224,56 @@ def convert(src, target, timeout, brd=None, method='cli'):
             f.write('{"meta": {"filename": "scratch.kicad_pro", "version": 3}}\n')
     for lck in glob.glob(os.path.join(scratch, '*.lck')):
         os.remove(lck)
-    p = subprocess.Popen([os.path.join(kicad_bin(), 'kicad.exe'), pro])
+    p = ui.start_kicad(pro)
     # the eagle2kicad plugin (loaded in that process when the import opens the PCB editor)
     # saves the imported editors in-process - see _batch_hook in __init__.py
-    import json, tempfile
     bdir = os.path.join(tempfile.gettempdir(), 'eagle2kicad_batch'); os.makedirs(bdir, exist_ok=True)
     req = os.path.join(bdir, f'save_{p.pid}.json')
     with open(req, 'w') as f:
         json.dump({'name': name, 'target': target, 'editors': 2}, f)   # the save hook always sees both
     t_gui = time.time()
+    drv = None
     try:
         t0 = time.time(); mgr = None
         while time.time() - t0 < 120 and mgr is None:
-            for h in windows(p.pid):
-                if eagle_import_id(h):
-                    mgr = h
+            mgr = ui.manager()
+            if p.poll() is not None:
+                raise RuntimeError('KiCad exited at start-up')
             time.sleep(0.5)
         if mgr is None:
             raise RuntimeError('KiCad project manager window not found')
         time.sleep(1.5)
-        drv = DialogDriver([gui_src, target], log=lambda s: log('   ', s.strip()), layer_mapping=not cli_pcb, pid=p.pid, timeout=120)
+        drv = ui.driver([gui_src, target], log=lambda s: log('   ', s.strip()), layer_mapping=not cli_pcb, timeout=120)
         drv.start()
         t_mark = time.time() - 1
-        U.PostMessageW(mgr, WM_COMMAND, eagle_import_id(mgr) & 0xFFFF, 0)
-        # wait: both editors open with the new project, nothing modal, stable
-        t0 = time.time(); stable = 0; eds = []; first = {}
+        ui.import_eagle(mgr)
+        # wait: the editors open with the new project, nothing modal, stable
+        t0 = time.time(); stable = 0; first = {}
         while time.time() - t0 < timeout:
-            for dlg in _dialogs(p.pid):              # a message box nobody answers = error
-                if is_progress(dlg):
+            for dlg in ui.dialogs():                 # a message box nobody answers = error
+                if ui.is_progress(dlg):
                     continue                         # KiCad's progress window of a long import
-                first.setdefault(dlg, time.time())
-                if time.time() - first[dlg] > 90:
-                    raise RuntimeError(f'KiCad dialog left open: "{title(dlg)}": ' + dialog_text(dlg))
-            ws = windows(p.pid)
-            eds = [h for h in ws if h != mgr and name in title(h) and accel_id(h, 'Ctrl+S')]
-            busy = _dialogs(p.pid) or not all(U.IsWindowEnabled(h) for h in ws)
-            stable = stable + 1 if (len(eds) >= n_editors and not busy) else 0
+                first.setdefault(ui.key_of(dlg), time.time())
+                if time.time() - first[ui.key_of(dlg)] > 90:
+                    raise RuntimeError(f'KiCad dialog left open: "{ui.title(dlg)}": ' + ui.text(dlg))
+            eds = ui.editors(name)
+            stable = stable + 1 if (len(eds) >= n_editors and not ui.busy()) else 0
             if stable >= 6:
                 break
             if p.poll() is not None:
-                raise RuntimeError('kicad.exe exited during the import')
+                raise RuntimeError('KiCad exited during the import')
             time.sleep(0.5)
         else:
             raise RuntimeError('import did not finish (dialogs left open?): ' +
-                               ', '.join(title(h) for h in _dialogs(p.pid)))
+                               ', '.join(ui.title(h) for h in ui.dialogs()))
         log(f'    import done in {time.time() - t0:.0f} s, saving')
         if cli_pcb:
             # the save hook lives in the pcbnew plugin: open the PCB editor (empty board) so it loads;
             # its empty board is replaced by the kicad-cli board below
-            pid_ = accel_id(mgr, 'Ctrl+P')
-            if pid_:
-                U.PostMessageW(mgr, WM_COMMAND, pid_ & 0xFFFF, 0)
+            ui.open_pcb_editor(mgr)
             t1 = time.time(); stable = 0
             while time.time() - t1 < 120:
-                ws = windows(p.pid)
-                eds = [h for h in ws if h != mgr and name in title(h) and accel_id(h, 'Ctrl+S')]
-                busy = _dialogs(p.pid) or not all(U.IsWindowEnabled(h) for h in ws)
-                stable = stable + 1 if (len(eds) >= 2 and not busy) else 0
+                stable = stable + 1 if (len(ui.editors(name)) >= 2 and not ui.busy()) else 0
                 if stable >= 4:
                     break
                 time.sleep(0.5)
@@ -226,21 +296,16 @@ def convert(src, target, timeout, brd=None, method='cli'):
         meta['gui_import_s'] = round(time.time() - t_gui, 1)
         check_lib_table(target, name)
     finally:
-        if 'drv' in locals():
+        if drv is not None:
             drv.stop_flag = True
-        if 'drv' in locals() and drv.messages:
-            meta['kicad_messages'] = [{'title': t, 'text': x, 'action': a_} for t, x, a_ in drv.messages]
-            meta['kicad_known_issues'] = sorted({a_[len('confirmed ('):-1] for _, _, a_ in drv.messages
-                                                 if a_.startswith('confirmed (')})
+            if drv.messages:
+                meta['kicad_messages'] = [{'title': t, 'text': x, 'action': a_} for t, x, a_ in drv.messages]
+                meta['kicad_known_issues'] = sorted({a_[len('confirmed ('):-1] for _, _, a_ in drv.messages
+                                                     if a_.startswith('confirmed (')})
         for f in (req, req[:-5] + '.done', req[:-5] + '.done.err'):
             if os.path.isfile(f):
                 os.remove(f)
-        for h in windows(p.pid):
-            U.PostMessageW(h, WM_CLOSE, 0, 0)
-        try:
-            p.wait(20)
-        except subprocess.TimeoutExpired:
-            p.kill()                         # everything is saved; a lingering exit is harmless
+        ui.close_kicad()
         for lck in glob.glob(os.path.join(target, '*.lck')):
             os.remove(lck)
     if cli_pcb:
