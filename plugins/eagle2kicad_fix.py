@@ -2034,6 +2034,21 @@ def ask_user(kind, title, text, options, default):
     return a
 
 
+def _eagle_kicad_offset(pcbnew, board, root):
+    """EAGLE -> KiCad board frame: kx = ex + ox, ky = -ey + oy (the importer re-centres the board);
+    the median over the placed elements, (None, None) without any"""
+    fps = {fp.GetReference(): fp for fp in board.GetFootprints()}
+    offs = []
+    for el in root.iter('element'):
+        fp = fps.get(kref(el.get('name')))
+        if fp is not None:
+            p = fp.GetPosition()
+            offs.append((p.x / 1e6 - float(el.get('x')), p.y / 1e6 + float(el.get('y'))))
+    if not offs:
+        return None, None
+    return sorted(o[0] for o in offs)[len(offs) // 2], sorted(o[1] for o in offs)[len(offs) // 2]
+
+
 def untent_large_vias(pcb_path, ebrd, dry):
     """EAGLE leaves vias with a drill larger than the design rule 'mlViaStopLimit' open in the solder
     mask (stop mask = via diameter); KiCad tents every via by default. Large grounded vias are often
@@ -2053,6 +2068,20 @@ def untent_large_vias(pcb_path, ebrd, dry):
         hit = [v for v in board.GetTracks() if v.GetClass() == 'PCB_VIA' and v.GetDrillValue() / 1e6 > lim + 1e-6]
         R.p(f'EAGLE via stop limit {lim:.3f} mm: {len(hit)} via(s) with a larger drill get a solder-mask opening'
             + (f" ({', '.join(sorted({f'{v.GetDrillValue() / 1e6:g} mm' for v in hit}))})" if hit else ''))
+        # vias marked 'alwaysstop' (EAGLE: always a solder-mask opening, any drill - test points,
+        # crystal-can ground stitches) - matched by position in the KiCad frame
+        always = [(float(v.get('x')), float(v.get('y'))) for v in root.iter('via') if v.get('alwaysstop') == 'yes']
+        if always:
+            ox, oy = _eagle_kicad_offset(pcbnew, board, root)
+            if ox is not None:
+                pos = [((x + ox) * 1e6, (-y + oy) * 1e6) for x, y in always]
+                extra = [v for v in board.GetTracks() if v.GetClass() == 'PCB_VIA' and v not in hit
+                         and any(abs(v.GetPosition().x - px) < 2e4 and abs(v.GetPosition().y - py) < 2e4
+                                 for px, py in pos)]
+                R.p(f'{len(always)} EAGLE via(s) marked always-stop, {len(extra)} matched: solder-mask opening')
+                hit += extra
+            else:
+                R.p(f'{len(always)} EAGLE via(s) marked always-stop - no element to place them by, left tented')
         if hit:
             # Eagle opens them by the via diameter plus its stop frame; KiCad uses the board-wide
             # solder-mask expansion for vias (every pad carries its own margin from the importer)
