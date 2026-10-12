@@ -634,6 +634,63 @@ def fix_power_values(sheets, esch=None):
 def is_bus_name(t):
     return bool(re.search(r'\[\d+\.\.\d+\]|\{.*\}', t))
 
+def fix_labels_on_bus(sheets, step=1.27):
+    """A net label that sits on a bus line names that bus in KiCad: several Eagle nets whose wires
+    end on a bus with their labels (Eagle never connects a net to a bus) become one net in KiCad.
+    Such a label moves one grid step along its own wire, off the bus."""
+    R.h('SCH: net labels sitting on a bus line')
+    def segs(sh, head):
+        out = []
+        for w in kids(sh.tree, head):
+            xy = kids(kid(w, 'pts') or [], 'xy')
+            if len(xy) == 2:
+                out.append((float(xy[0][1]), float(xy[0][2]), float(xy[1][1]), float(xy[1][2])))
+        return out
+    def on(g, x, y, eps=1e-4):
+        x1, y1, x2, y2 = g
+        return abs((x - x1) * (y2 - y1) - (y - y1) * (x2 - x1)) < eps * max(1.0, abs(x2 - x1) + abs(y2 - y1)) \
+            and min(x1, x2) - eps <= x <= max(x1, x2) + eps and min(y1, y2) - eps <= y <= max(y1, y2) + eps
+    n, skipped, names = 0, 0, []
+    for sh in sheets:
+        buses, wires = segs(sh, 'bus'), segs(sh, 'wire')
+        if not buses:
+            continue
+        for node in sh.tree:
+            if not (isinstance(node, list) and node and node[0] in ('label', 'global_label')):
+                continue
+            text = str(node[1])
+            at = kid(node, 'at')
+            if is_bus_name(text) or not at:
+                continue
+            x, y = float(at[1]), float(at[2])
+            if not any(on(b, x, y) for b in buses):
+                continue
+            far = None
+            for w in wires:
+                for (ax, ay), (bx, by) in (((w[0], w[1]), (w[2], w[3])), ((w[2], w[3]), (w[0], w[1]))):
+                    if abs(ax - x) < 1e-4 and abs(ay - y) < 1e-4 and (bx, by) != (ax, ay):
+                        far = (bx, by)
+            if far is None:
+                skipped += 1
+                continue
+            L = math.hypot(far[0] - x, far[1] - y)
+            d = min(step, L / 2)
+            nx, ny = x + (far[0] - x) * d / L, y + (far[1] - y) * d / L
+            if any(on(b, nx, ny) for b in buses):
+                skipped += 1
+                continue
+            dx, dy = nx - x, ny - y
+            at[1], at[2] = f'{nx:.4f}'.rstrip('0').rstrip('.'), f'{ny:.4f}'.rstrip('0').rstrip('.')
+            for pr in kids(node, 'property'):
+                pa = kid(pr, 'at')
+                if pa:
+                    pa[1] = f'{float(pa[1]) + dx:.4f}'.rstrip('0').rstrip('.')
+                    pa[2] = f'{float(pa[2]) + dy:.4f}'.rstrip('0').rstrip('.')
+            sh.dirty = True; n += 1; names.append(text)
+    R.p(f'{n} labels moved off a bus' + (': ' + ', '.join(names[:15]) if names else '') +
+        (f'; {skipped} labels on a bus left (no wire end to move along)' if skipped else ''))
+
+
 def fix_local_labels(sheets):
     R.h('SCH: local labels -> global labels (Eagle nets are global)')
     if any(kids(sh.tree, 'sheet') for sh in sheets):
@@ -4197,6 +4254,7 @@ def main():
         fix_field_visibility(esch, sheets)
     if not a.no_label_globalize:
         fix_local_labels(sheets)
+    fix_labels_on_bus(sheets)
     fix_pinless(sheets)
     fix_nc_pins(d, sheets, eagle_sch_truth(esch) if esch else None, a.dry_run)
     if not a.dry_run:
