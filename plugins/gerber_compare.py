@@ -1085,6 +1085,7 @@ def eagle_pours(brd_path, geo, off=(0.0, 0.0)):
 
 
 POUR_EDGE = 1.0      # mm
+HAIRLINE = 0.02      # mm mean thickness of a difference spot (area / length)
 
 
 def _cu_keys(b):
@@ -1228,6 +1229,12 @@ def compare(eagle_dir, kicad_dir, brd=None, tol=0.03, geo=None, log=print, prefe
             if tx:
                 entry['text_spots'] = len(tx); entry['text_mm2'] = round(sum(t[0] for t in tx), 3)
                 spots = [t for t in spots if t not in tx]
+        # hairlines: a long, sub-resolution sliver along a whole pad row (aperture / unit rounding of the
+        # two CAM outputs, e.g. inch 2.5 against mm) - mean thickness below 20 um is not a geometry change
+        hl = [t for t in spots if t[0] / max(t[3], t[4], 1e-9) < HAIRLINE]
+        if hl:
+            entry['hairlines'] = len(hl)
+            spots = [t for t in spots if t not in hl]
         entry['spots_mm2'] = round(sum(t[0] for t in spots), 3)
         spots.sort(key=lambda t: -t[0])
         entry['spots'] = [dict(mm2=round(a_, 4), x=round(cx, 3), y=round(cy, 3), w=round(w, 3), h=round(h, 3), only_in=side)
@@ -1284,6 +1291,8 @@ def verdict(res, spot_min=0.05):
         if e.get('text_spots'):
             warns.append(f"{k}: {e['text_spots']} differences at EAGLE text on this layer, {e['text_mm2']:.2f} mm2 - "
                          "vector font differs between the tools (check the text is still legible and clear of other copper)")
+        if e.get('hairlines'):
+            infos.append(f"{k}: {e['hairlines']} hairline differences (< {HAIRLINE * 1000:.0f} um mean width, CAM rounding)")
         if e.get('hole_contours'):
             infos.append(f"{k}: {e['hole_contours']} hole contours plotted by the EAGLE CAM job on the outline layer "
                          "(the holes themselves are in the drill files)")
