@@ -3787,6 +3787,13 @@ def selftest(d, proj, cli, esch, ebrd):
     # without such a pair the swap is detected by net NAME (renames above the unfaulted baseline).
     f2 = None; f2_named = False
     netpads = Counter(sx_dump(kid(p_, 'net')) for fp in fps for p_ in smd_pads(fp))
+    # the two pads must be on different nets in the EAGLE board too: where KiCad split one EAGLE net
+    # in two (or a pad EAGLE does not know), swapping them changes nothing the compare could see
+    e_p2n = {rp: n_ for n_, rps in eagle_brd_truth(ebrd).items() for rp in rps}
+    def _eagle_differ(fp, pa, pb):
+        r = prop_val(fp, 'Reference')
+        ea, eb = e_p2n.get((r, str(pa[1]).strip('"'))), e_p2n.get((r, str(pb[1]).strip('"')))
+        return ea is not None and eb is not None and ea != eb   # both pads known to EAGLE
     for need in (2, 1):
         for fp in fps:
             if id(fp) in used: continue
@@ -3794,7 +3801,7 @@ def selftest(d, proj, cli, esch, ebrd):
             for i in range(len(ps)):
                 for j in range(i + 1, len(ps)):
                     na, nb = sx_dump(kid(ps[i], 'net')), sx_dump(kid(ps[j], 'net'))
-                    if na != nb and netpads[na] >= need and netpads[nb] >= need:
+                    if na != nb and netpads[na] >= need and netpads[nb] >= need and _eagle_differ(fp, ps[i], ps[j]):
                         f2 = (fp, ps[i], ps[j]); break
                 if f2: break
             if f2: break
