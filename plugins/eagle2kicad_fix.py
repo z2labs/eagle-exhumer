@@ -32,6 +32,16 @@ import argparse, datetime, glob, json, math, os, re, shutil, subprocess, sys, ti
 import xml.etree.ElementTree as ET
 from collections import defaultdict, Counter
 
+
+def _byname(parent, path, name):
+    """child at `path` whose name attribute equals `name` - no XPath predicate, so names with
+    quotes or brackets (EAGLE allows them, e.g. 15.6'' displays) cannot break the lookup"""
+    for e in parent.findall(path):
+        if e.get('name') == name:
+            return e
+    return None
+
+
 # --------------------------------------------------------------------------- S-expressions
 
 class Q(str):
@@ -582,10 +592,10 @@ def eagle_supply_nets(path):
         if k not in sup:
             sup[k] = False
             p = parts.get(part); lib = libs.get(p.get('library')) if p is not None else None
-            ds = lib.find(f"devicesets/deviceset[@name='{p.get('deviceset')}']") if lib is not None else None
-            g = ds.find(f"gates/gate[@name='{gate}']") if ds is not None else None
-            sym = lib.find(f"symbols/symbol[@name='{g.get('symbol')}']") if g is not None else None
-            pe = sym.find(f"pin[@name='{pin}']") if sym is not None else None
+            ds = _byname(lib, 'devicesets/deviceset', p.get('deviceset')) if lib is not None else None
+            g = _byname(ds, 'gates/gate', gate) if ds is not None else None
+            sym = _byname(lib, 'symbols/symbol', g.get('symbol')) if g is not None else None
+            pe = _byname(sym, 'pin', pin) if sym is not None else None
             sup[k] = pe is not None and pe.get('direction') == 'sup'
         return sup[k]
     for net in sch.iter('net'):

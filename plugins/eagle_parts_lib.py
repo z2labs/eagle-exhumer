@@ -17,6 +17,16 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from eagle2kicad_fix import Q, sx_dump, kids, kid, prop, prop_val, read_sx, kref  # noqa: E402
 from eagle_lib_export import _set_prop, _pins, _rename, _txt  # noqa: E402
 
+
+def _byname(parent, path, name):
+    """child at `path` whose name attribute equals `name` - no XPath predicate, so names with
+    quotes or brackets (EAGLE allows them, e.g. 15.6'' displays) cannot break the lookup"""
+    for e in parent.findall(path):
+        if e.get('name') == name:
+            return e
+    return None
+
+
 MPN_KEYS = ('PARTNR', 'MPN', 'MANUFACTURER_PART_NUMBER', 'PART_NUMBER', 'MPN1', 'MPN2', 'MPN3')
 MFR_KEYS = ('VENDOR', 'MANUFACTURER', 'MANUFACTURER_NAME', 'MFR', 'MF')
 SUPPLIERS = (('Farnell', 'OC_FARNELL'), ('Digikey', 'OC_DIGIKEY'), ('Digikey', 'DIGI-KEY_PART_NUMBER'),
@@ -57,10 +67,10 @@ def eagle_parts(sch_path):
     parts = []
     for p in s.findall('parts/part'):
         L = libs.get(p.get('library'))
-        ds = L.find(f"devicesets/deviceset[@name='{p.get('deviceset')}']") if L is not None else None
+        ds = _byname(L, 'devicesets/deviceset', p.get('deviceset')) if L is not None else None
         if ds is None:
             continue
-        dev = ds.find(f"devices/device[@name='{p.get('device', '')}']")
+        dev = _byname(ds, 'devices/device', p.get('device', ''))
         if dev is None or not dev.get('package'):
             continue                                 # supply symbols, frames: not parts
         attrs = {}

@@ -9,6 +9,16 @@ written next to the project so the harvested libraries can be named after the EA
 """
 import copy, json, os, re, xml.etree.ElementTree as ET
 
+
+def _byname(parent, path, name):
+    """child at `path` whose name attribute equals `name` - no XPath predicate, so names with
+    quotes or brackets (EAGLE allows them, e.g. 15.6'' displays) cannot break the lookup"""
+    for e in parent.findall(path):
+        if e.get('name') == name:
+            return e
+    return None
+
+
 GRID = 2.54
 PART_COLS = 8                  # parts per row on a sheet
 PARTS_PER_SHEET = 40
@@ -216,7 +226,7 @@ def lbr_to_project(lbr_path, out_dir, name=None):
         for pd in pads:
             ET.SubElement(signal[net], 'contactref', element=ref, pad=pd)
             pk = packages.get(dict((r_, k_) for r_, k_, _ in placed).get(ref))
-            q = pk.find(f"*[@name='{pd}']") if pk is not None else None
+            q = _byname(pk, '*', pd) if pk is not None else None
             if q is not None:
                 padpos.setdefault(net, []).append((pos[ref][0] + _f(q, 'x'), pos[ref][1] + _f(q, 'y')))
     for net, pts in padpos.items():                    # unrouted by design: EAGLE airwires (layer 19)
