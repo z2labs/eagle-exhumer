@@ -115,8 +115,7 @@ class LinuxUI:
         with open(os.path.join(xdg, 'glib-2.0', 'settings', 'keyfile'), 'w') as f:
             f.write("[org/gtk/settings/file-chooser]\nlocation-mode='filename-entry'\n"
                     "show-hidden=false\nsort-directories-first=true\n")
-        self.env.setdefault('KICAD_CONFIG_HOME', os.path.join(
-            os.environ.get('XDG_CONFIG_HOME') or os.path.expanduser('~/.config'), 'kicad'))
+        self.env['KICAD_CONFIG_HOME'] = self._private_kicad_config()
         self.env.update(XDG_CONFIG_HOME=xdg, GSETTINGS_BACKEND='keyfile')
         bus = 'unix:path=' + os.path.join(self.tmp, 'bus')
         self.procs.append(subprocess.Popen(['dbus-daemon', '--session', '--nofork', '--address=' + bus], env=self.env,
@@ -146,6 +145,31 @@ class LinuxUI:
         self.srv = _Srv(self.env, log)
         if self.srv.call('ping') != 'pong':
             raise RuntimeError('AT-SPI helper did not start')
+
+    def _private_kicad_config(self):
+        """A copy of the user's KiCad config for this batch only: the editors use the software (Cairo)
+        canvas - Xvfb has no OpenGL and KiCad would stop on an 'insufficient GPU memory' box for big
+        boards. The user's own settings are never written."""
+        src = os.environ.get('KICAD_CONFIG_HOME') or os.path.join(
+            os.environ.get('XDG_CONFIG_HOME') or os.path.expanduser('~/.config'), 'kicad')
+        dst = os.path.join(self.tmp, 'kicad')
+        if os.path.isdir(src):
+            shutil.copytree(src, dst, ignore=shutil.ignore_patterns('3d', '*.lck'))
+        else:
+            os.makedirs(dst)
+        vers = [v for v in os.listdir(dst) if re.match(r'\d+\.\d+$', v)] or ['10.0']
+        for v in vers:
+            for app in ('eeschema', 'pcbnew', 'fpedit', 'symbol_editor', 'gerbview', 'pl_editor'):
+                f = os.path.join(dst, v, app + '.json')
+                try:
+                    cfg = json.load(open(f, encoding='utf-8')) if os.path.isfile(f) else {}
+                except ValueError:
+                    cfg = {}
+                cfg.setdefault('graphics', {})['canvas_type'] = 2        # EDA_DRAW_PANEL_GAL::GAL_TYPE_CAIRO
+                os.makedirs(os.path.dirname(f), exist_ok=True)
+                with open(f, 'w', encoding='utf-8') as fh:
+                    json.dump(cfg, fh, indent=2)
+        return dst
 
     def _start_x(self):
         for n in range(91, 140):
@@ -491,6 +515,24 @@ class DialogDriver(threading.Thread):
                 self.handle_message(d)
             time.sleep(0.3)
 
+    def _close_verified(self, d, names):
+        """Press the button and make sure the box is gone (else: front + Return, once more)."""
+        ui = self.ui
+        kd = ui.key_of(d)
+        for attempt in range(3):
+            if attempt == 0:
+                ui.click(d, names)
+            elif attempt == 1:
+                ui.key('Return', win=d)
+            else:
+                ui.click(d, names)
+            t = time.time()
+            while time.time() - t < 2.5:
+                if kd not in {ui.key_of(x) for x in ui.dialogs()}:
+                    return True
+                time.sleep(0.25)
+        return False
+
     def handle_message(self, d):
         ui = self.ui
         kd = ui.key_of(d)
@@ -498,13 +540,18 @@ class DialogDriver(threading.Thread):
         names, msg = ui.button_names(d), ui.text(d)
         for rx, btn, why_ in ANSWERS:
             if rx.search(msg or '') and btn in names:
-                ui.click(d, (btn,))
+                if not self._close_verified(d, (btn,)):
+                    self.seen.discard(kd)
+                    return
                 self.messages.append((kd[1], msg, f'answered {btn} ({why_})'))
                 self.log(f'  [KiCad question, answered {btn}] "{kd[1]}" {msg[:120]}')
                 return
         why = benign_reason(msg)
         if names == ['ok'] or why:
-            ui.click(d, ('ok',))
+            if not self._close_verified(d, ('ok',)):
+                self.seen.discard(kd)                # still open: try again on the next pass
+                self.log(f'  [KiCad message] "{kd[1]}" did not close, retrying')
+                return
             tag = f'known KiCad issue: {why}' if why else 'confirmed automatically'
             self.messages.append((kd[1], msg, 'confirmed' + (f' ({why})' if why else '')))
             self.log(f'  [KiCad message, {tag}] "{kd[1]}" {msg}')
