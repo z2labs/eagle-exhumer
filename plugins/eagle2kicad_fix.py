@@ -877,10 +877,14 @@ def add_pwr_flags(cli, root_sch, sheets, tmpdir):
                 if mir and mir[1] == 'x': ang += 180
                 ang %= 360
             elif pin_hit:
-                # no power symbol on this net (e.g. an on-chip regulator output like VDDCORE):
-                # put the flag directly on the pin end
-                sh, inst, (px, py) = pin_hit
-                ang = 0
+                # no power symbol on this net: typically an on-chip regulator output decoupled by a
+                # capacitor (R820T2 VCC_2 / VDD_PLL, VDDCORE ...) that the Eagle library typed as a
+                # power INPUT. A PWR_FLAG there would claim an external supply that does not exist
+                # (and lands on the pin text) -> leave the ERC item for a human, do not hide it.
+                manual.append(f'net `{net}` ({prop_val(pin_hit[1], "Reference", "?")}): power-input pin, no power '
+                              'output on the net (fed through a passive/connector pin, or an on-chip regulator output '
+                              'typed as power input in the Eagle library) - no PWR_FLAG added, check by hand')
+                done.add(net); continue
             else:
                 manual.append(f'net `{net}` (no power symbol to attach to)'); continue
             flg_max += 1
@@ -2946,6 +2950,36 @@ def sync_pcb_to_sch(cli, root_sch, pcb_path, pro_path, sheets, tmpdir, dry):
             json.dump(pro, f, indent=2)
 
 
+def fix_field_visibility(esch, sheets):
+    """Eagle shows a part attribute on the schematic only where the instance carries it with a
+    display other than "off"; KiCad's importer makes every attribute field VISIBLE (PARTNR, VENDOR,
+    OC_* ... printed over the drawing). Hide the fields Eagle did not show."""
+    R.h('SCH: field visibility as in Eagle')
+    root = eagle_root(esch)
+    if root is None:
+        return
+    shown = defaultdict(set)
+    for inst in root.iter('instance'):
+        for a in inst.findall('attribute'):
+            if (a.get('display') or 'value') != 'off':
+                shown[kref(inst.get('part'))].add(a.get('name'))
+    keep = {'Reference', 'Value', 'Footprint', 'Datasheet', 'Description', 'Intersheetrefs'}
+    n = 0
+    for sh in sheets:
+        for inst in sh.instances():
+            refs = set(_inst_refs(inst))
+            vis = set().union(*(shown.get(r, set()) for r in refs)) if refs else set()
+            for pp in kids(inst, 'property'):
+                nm = str(pp[1])
+                if nm in keep or nm.startswith('ki_') or nm in vis or kid(pp, 'hide') is not None:
+                    continue
+                eff = kid(pp, 'effects')
+                if eff is not None and kid(eff, 'hide') is not None:
+                    continue
+                pp.append(['hide', 'yes']); sh.dirty = True; n += 1
+    R.p(f'{n} attribute fields hidden (not displayed in Eagle; KiCad import made them visible)')
+
+
 def fix_attr_fields(esch, sheets, dry):
     """Eagle attributes the KiCad importer drops: DESCRIPTION collides with KiCad's built-in
     Description field (left empty), so it is copied there; any other missing attribute is added as
@@ -3479,6 +3513,7 @@ def main():
     fix_power_values(sheets, esch)
     if esch:
         fix_attr_fields(esch, sheets, a.dry_run)
+        fix_field_visibility(esch, sheets)
     if not a.no_label_globalize:
         fix_local_labels(sheets)
     fix_pinless(sheets)
