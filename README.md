@@ -140,6 +140,10 @@ Click **Report a problem...** in the Eagle Exhumer window. It packs a diagnostic
 - Open items from the 0.10.0 benchmark, each reported by the quality control: an arc track whose end stops short of its pad (1 design); pads inside a copper pour that KiCad fills as separate islands (2 designs); per-pad solder-mask openings that differ from EAGLE's (2 designs); one open net in the schematic (2 designs); one drill hole in the EAGLE CAM output with no hole in the design (1 design); automatic EAGLE net names on a panelized design (1 design); an "unrouted" count from the quality control that KiCad's own DRC does not reproduce (5 designs, under investigation).
 - This is a legacy SWIG Action Plugin. KiCad plans to replace that API, so a port to the IPC API will be needed for KiCad 11.
 
+## Services
+
+Z2Labs takes on PCB conversion (EAGLE and other tools to KiCad), RF hardware design and RF troubleshooting. Write to **hello [at] z2labs [dot] io**.
+
 ## License
 
 GPL-3.0. See [LICENSE](LICENSE).
@@ -148,4 +152,4 @@ Not affiliated with or endorsed by Autodesk. EAGLE is a trademark of Autodesk, I
 
 ---
 
-*Magyarul röviden:* régi EAGLE-tervek átvitele KiCad 10-be. A tool a KiCad saját importja után kijavítja a 14 ismert importhibát, majd szigorú minőségellenőrzéssel zárul. Hibát, kérést [issue](https://github.com/z2labs/eagle-exhumer/issues) formájában várunk.
+*Magyarul röviden:* régi EAGLE-tervek átvitele KiCad 10-be. A tool a KiCad saját importja után kijavítja a 14 ismert importhibát, majd szigorú minőségellenőrzéssel zárul. Hibát, kérést [issue](https://github.com/z2labs/eagle-exhumer/issues) formájában várunk. PCB-konverziót, RF hardvertervezést és RF hibakeresést is vállalunk: hello [at] z2labs [dot] io.

@@ -22,6 +22,9 @@ import wx
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 VERSION = '0.9.12'
+# shown at the bottom of the plugin window; address written out against address harvesters
+SERVICES = ('Need a hand? Z2Labs takes on PCB conversion, RF hardware design and RF troubleshooting - '
+            'hello [at] z2labs [dot] io')
 
 _ACTIVE = []          # keep running jobs referenced after the PCB frame closes
 
@@ -185,6 +188,8 @@ class LogWindow(wx.Frame):
         self.b_report_md.Bind(wx.EVT_BUTTON, self._open_report)
         self.b_sch.Bind(wx.EVT_BUTTON, lambda e: self._open_editor('\tCtrl+E'))
         self.b_pcb.Bind(wx.EVT_BUTTON, lambda e: self._open_editor('\tCtrl+P'))
+        self.services = wx.StaticText(p, label=SERVICES)
+        self.services.SetForegroundColour(wx.Colour(110, 110, 110))
         btns = wx.BoxSizer(wx.HORIZONTAL)
         btns.Add(self.b_details, 0, wx.RIGHT, 8)
         btns.AddStretchSpacer()
@@ -198,6 +203,7 @@ class LogWindow(wx.Frame):
         box.Add(self.result, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 10)
         box.Add(self.txt, 1, wx.EXPAND | wx.ALL, 10)
         box.Add(btns, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
+        box.Add(self.services, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
         p.SetSizer(box)
         self.note.Wrap(820)
         self.txt.Hide()
