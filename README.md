@@ -52,6 +52,7 @@ Open the **PCB Editor from the KiCad project manager**, not as a standalone app,
   2. saves the project to `<design>_kicad/`;
   3. fixes it and runs the check;
   4. reopens the editors.
+- **Batch (Windows and Linux).** `plugins/eagle2kicad_batch.py <folder>` converts every Eagle design below a folder unattended (import + fix + quality control) and writes one summary table. On Linux it runs KiCad on a private virtual display, so nothing appears on the desktop; it needs `xvfb xdotool dbus-daemon at-spi2-core python3-gi gir1.2-atspi-2.0`. See `tools/benchmark/README.md`.
 - **Fix + check (all platforms).** Step by step:
   1. In the KiCad project manager: *File → Import Non-KiCad Project → EAGLE*, pick the `.sch`/`.brd`, choose an **empty** destination folder, accept the layer mapping.
   2. **Save** the project (*File → Save* in the project manager) - KiCad's import leaves it unsaved, and the plugin works on the saved files.
@@ -77,7 +78,9 @@ Use KiCad's own Python (Windows: `C:\Program Files\KiCad\10.0\bin\python.exe`). 
 
 ## Tested on
 
-19 real designs: 11 open-hardware boards from [Olimex OLINUXINO](https://github.com/OLIMEX/OLINUXINO/tree/master/HARDWARE), 7 boards from Zoltan Doczi's own PCB designs and one private 4-sheet EAGLE 9.6.2 design — 3,214 parts, 14,044 pads, 7,610 vias, 1 to 6 copper layers. **18 of 19 pass the quality control**; the one FAIL is a reference collision (`GND` vs `GND0`) that needs a human decision.
+**Benchmark of 0.10.0 (2026-10-13): 182 EAGLE designs, 166 pass the quality control.** 111 open-hardware boards from [Olimex OLINUXINO](https://github.com/OLIMEX/OLINUXINO/tree/master/HARDWARE) (EAGLE 4.16 binary and EAGLE 6-7 XML), public SparkFun and Bus Pirate designs, and private designs. Each one is converted unattended, checked against the Eagle source (nets, pads, parts, geometry) and its KiCad Gerber and drill files are compared with the EAGLE 7.7 CAM output of the same board. The whole benchmark ran twice on Linux with identical results on every design; a Windows run of a subset agrees. The 16 that do not pass: 2 with an invalid reference CAM set, 1 using EAGLE modules, and 13 with the open items listed under [Known limits](#known-limits) (one design has two of them).
+
+Earlier corpus (0.9.x), 19 real designs: 11 open-hardware boards from [Olimex OLINUXINO](https://github.com/OLIMEX/OLINUXINO/tree/master/HARDWARE), 7 boards from Zoltan Doczi's own PCB designs and one private 4-sheet EAGLE 9.6.2 design — 3,214 parts, 14,044 pads, 7,610 vias, 1 to 6 copper layers. **18 of 19 pass the quality control**; the one FAIL is a reference collision (`GND` vs `GND0`) that needs a human decision.
 
 KiCad 10.0.6 native import vs. after Eagle Exhumer, 18 batch designs (full re-runs of the corpus with 0.9.7 on 2026-10-08 and with 0.9.10 on 2026-10-10):
 
@@ -133,6 +136,8 @@ Click **Report a problem...** in the Eagle Exhumer window. It packs a diagnostic
 - No 3D models: EAGLE designs carry none. The report lists the footprints without a model as a warning, not a failure.
 - Design-rule violations that exist in the Eagle original stay. The tool translates the design; it does not redesign it.
 - KiCad 10 can show "cannot open ...\\sym-lib-table" during the import of large multi-sheet designs, although the file is written correctly. Eagle Exhumer recognises this message, confirms it, notes it in the report, and checks the library table afterwards. Any other KiCad error dialog stops the run, and its full text goes into the log.
+- EAGLE modules (hierarchical schematics, EAGLE 8+) are not supported by KiCad's EAGLE importer; such designs fail the quality control.
+- Open items from the 0.10.0 benchmark, each reported by the quality control: an arc track whose end stops short of its pad (1 design); pads inside a copper pour that KiCad fills as separate islands (2 designs); per-pad solder-mask openings that differ from EAGLE's (2 designs); one open net in the schematic (2 designs); one drill hole in the EAGLE CAM output with no hole in the design (1 design); automatic EAGLE net names on a panelized design (1 design); an "unrouted" count from the quality control that KiCad's own DRC does not reproduce (5 designs, under investigation).
 - This is a legacy SWIG Action Plugin. KiCad plans to replace that API, so a port to the IPC API will be needed for KiCad 11.
 
 ## License
