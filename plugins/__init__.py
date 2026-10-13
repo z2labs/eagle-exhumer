@@ -21,7 +21,7 @@ import wx
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-VERSION = '0.9.10'
+VERSION = '0.9.11'
 
 _ACTIVE = []          # keep running jobs referenced after the PCB frame closes
 
@@ -629,6 +629,14 @@ class ImportJob:
                        f"shows bare pads; assign models in the footprint properties if you need them)")
         if w.get('3d_model_not_found'):
             out.append(f"{w['3d_model_not_found']} footprints point to a 3D model file that is not found")
+        if w.get('eagle_sch_brd_attr_mismatch'):
+            out.append(f"the Eagle schematic and board disagree on {w['eagle_sch_brd_attr_mismatch']} part attributes "
+                       f"(e.g. PARTNR) - see the report before ordering parts")
+        if w.get('plated_slots_converted'):
+            out.append(f"{w['plated_slots_converted']} milled slots with copper on both sides became PLATED slots - "
+                       f"check against the part datasheet")
+        if w.get('plated_slots_kept'):
+            out.append(f"{w['plated_slots_kept']} milled contours in packages stay NON-plated cut-outs - see the report")
         return ('\n\nWarning: ' + '; '.join(out) + '.') if out else ''
 
     def _finish(self, rc):

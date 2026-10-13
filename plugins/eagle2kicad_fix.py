@@ -28,7 +28,7 @@ What it fixes (each step logged in eaglefix_report.md):
   VERIFY  Eagle netlist (ground truth) vs KiCad schematic netlist and PCB pad nets:
           reports every merged (short) and split (open) net.
 """
-import argparse, datetime, glob, json, os, re, shutil, subprocess, sys, time, uuid
+import argparse, datetime, glob, json, math, os, re, shutil, subprocess, sys, time, uuid
 import xml.etree.ElementTree as ET
 from collections import defaultdict, Counter
 
@@ -466,6 +466,26 @@ def drc_summary(d):
     for v in d.get('schematic_parity', []):
         c[('parity:' + v['type'], v['severity'])] += 1
     return c
+
+def _save_json(obj, path):
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(obj, f, indent=1)
+    except OSError as ex:
+        R.p(f'could not write {os.path.basename(path)}: {ex}')
+
+
+def eagle_approved_errors(ebrd):
+    """Counter of the DRC errors the designer approved in Eagle (<errors><approved hash="code,layer,...">)."""
+    root = eagle_root(ebrd) if ebrd else None
+    c = Counter()
+    if root is not None:
+        for a in root.iter('approved'):
+            h = (a.get('hash') or '').split(',')
+            if len(h) >= 2:
+                c[f'{h[0]},{h[1]}'] += 1
+    return c
+
 
 def print_counter(title, c):
     R.p(f'{title}: total {sum(c.values())}')
@@ -1550,8 +1570,17 @@ def verify_geometry(pcb_path, ebrd):
     for n in set(k_len) | set(k_via) | set(k_poly):
         kn.setdefault(norm_net(n), n)
     n_len = n_via = n_poly = 0
+    # Eagle signal -> KiCad net through its pads (net names may legitimately differ: Eagle N$ nets get
+    # the schematic's name in KiCad); name match only for pad-less copper
+    emap = {}
+    for sig in brd.findall('signals/signal'):
+        for c in sig.findall('contactref'):
+            fp = fps.get(kref(c.get('element')))
+            pd = fp.FindPadByNumber(c.get('pad')) if fp is not None else None
+            if pd is not None and pd.GetNetname():
+                emap[sig.get('name')] = pd.GetNetname(); break
     for n in sorted(set(e_len) | set(e_via)):
-        k = kn.get(n.replace('!', ''), kn.get(n))
+        k = emap.get(n) or kn.get(n.replace('!', ''), kn.get(n))
         el, kl = e_len.get(n, 0), k_len.get(k, 0) if k else 0
         if abs(el - kl) > max(0.01, 0.002 * el):
             n_len += 1
@@ -1971,15 +2000,118 @@ def fix_pcb_sexpr(pcb_path, sch_refs, dry, ebrd=None):
         n_cu += _fp_copper_polys_to_pads(fp)
         n_nt += _fp_net_ties(fp)
     n_via = _via_restring(tree, eagle_brd_rules(ebrd)[0]) if ebrd else 0
+    n_zt, zt_note = _zone_thermals(tree, ebrd) if ebrd else (0, '')
+    n_cy = sum(_open_courtyard_to_fab(fp) for fp in kids(tree, 'footprint'))
     R.p(f'{n_undef} items moved from UNDEFINED layer to Dwgs.User')
     R.p(f'{n_np} NPTH holes: net-less copper ring removed (pad size = drill)')
     R.p(f'{n_cu} package copper polygons -> custom pads with the net of the pad they touch (Eagle polygon-in-package)')
     R.p(f'{n_nt} net-tie pad groups (copper links inside Eagle packages, e.g. board-mounted 0R arrays)')
     R.p(f'{n_via} vias enlarged to Eagle restring (drill + 2 x clamp(rvViaOuter*drill, rlMin, rlMax))')
     R.p(f'{n_bo} footprints without schematic symbol marked board_only (holes, logos, fiducials)')
+    R.p(f'{n_zt} copper zones: thermal relief from Eagle {zt_note}')
+    R.p(f'{n_cy} footprints: Eagle courtyard repaired (duplicate lines removed; a still open outline '
+        'moved to the Fab layer - KiCad needs a closed courtyard; not manufactured)')
     if not dry:
         write_sx(pcb_path, tree)
     return tree
+
+
+def _open_courtyard_to_fab(fp):
+    """Eagle tKeepout/bKeepout-style outlines imported as courtyard lines that do not close ->
+    'malformed courtyard' DRC errors. Closed shapes stay; an open set of lines/arcs goes to Fab."""
+    moved = 0
+    for side, fab in (('F.CrtYd', 'F.Fab'), ('B.CrtYd', 'B.Fab')):
+        items = [x for x in fp if isinstance(x, list) and x and x[0] in ('fp_line', 'fp_arc')
+                 and kid(x, 'layer') is not None and str(kid(x, 'layer')[1]) == side]
+        if not items:
+            continue
+        seen, dup = set(), []                              # Eagle libraries often draw it twice
+        for x in items:
+            a, b = kid(x, 'start'), kid(x, 'end')
+            if a is None or b is None:
+                continue
+            k = frozenset([(round(float(a[1]), 3), round(float(a[2]), 3)), (round(float(b[1]), 3), round(float(b[2]), 3))])
+            if x[0] == 'fp_line' and k in seen:
+                dup.append(x)
+            seen.add(k)
+        for x in dup:
+            fp.remove(x); items.remove(x)
+        if dup:
+            moved = 1
+        deg = Counter()
+        for x in items:
+            for k in ('start', 'end'):
+                pt = kid(x, k)
+                if pt is not None:
+                    deg[(round(float(pt[1]), 3), round(float(pt[2]), 3))] += 1
+        if any(v % 2 for v in deg.values()):
+            for x in items:
+                kid(x, 'layer')[1] = Q(fab)
+            moved = 1
+    return moved
+
+
+def _zone_thermals(tree, ebrd):
+    """KiCad's importer sets thermal gap AND spoke width to polygon width + 0.05 mm (0.304 mm for a
+    10 mil polygon). Eagle: gap = DRC 'Supply / Thermal isolation' (slThermalIsolate), spoke =
+    polygon width, thermals="no" = solid. With the wider KiCad gap/spokes small QFN/DFN pads that
+    Eagle reaches through the pour stay unconnected (unrouted + starved_thermal)."""
+    root = eagle_root(ebrd)
+    if root is None:
+        return 0, ''
+    rules = eagle_brd_rules(ebrd)[0]
+    gap = _unit(rules['slThermalIsolate']) if rules.get('slThermalIsolate') else None
+    # Eagle copper layer -> KiCad layer name, in stack order (KiCad's importer keeps the order)
+    ls = root.find('drawing/board/designrules/param[@name="layerSetup"]')
+    used = sorted({int(x) for x in re.findall(r'\d+', ls.get('value', '') if ls is not None else '') if 1 <= int(x) <= 16})
+    if not used:
+        used = sorted({int(pg.get('layer')) for pg in root.iter('polygon') if pg.get('layer', '').isdigit()
+                       and 1 <= int(pg.get('layer')) <= 16})
+    lmap = {}
+    for i, num in enumerate(used):
+        lmap[str(num)] = 'F.Cu' if i == 0 and num == 1 else 'B.Cu' if num == 16 else f'In{i if used[0] == 1 else i + 1}.Cu'
+    polys = defaultdict(list)                              # (net, layer) -> [(cx, cy, width, thermals)]
+    for sig in root.iter('signal'):
+        for pg in sig.findall('polygon'):
+            if pg.get('pour') == 'cutout':
+                continue
+            v = [(float(a.get('x')), -float(a.get('y'))) for a in pg.findall('vertex')]
+            if v:
+                polys[(sig.get('name'), lmap.get(pg.get('layer')))].append(
+                    (sum(x for x, _ in v) / len(v), sum(y for _, y in v) / len(v),
+                     float(pg.get('width', '0') or 0), pg.get('thermals', 'yes') != 'no'))
+    n = 0
+    for z in kids(tree, 'zone'):
+        net = kid(z, 'net')
+        if net is None or kid(z, 'keepout') is not None:
+            continue
+        zl = kid(z, 'layer')
+        cand = polys.get((str(net[1]), str(zl[1]) if zl else None))
+        pol = kid(z, 'polygon'); pts = kid(pol, 'pts') if pol else None
+        xy = [(float(q[1]), float(q[2])) for q in kids(pts, 'xy')] if pts else []
+        if not cand or not xy:
+            continue
+        cx, cy = sum(x for x, _ in xy) / len(xy), sum(y for _, y in xy) / len(xy)
+        _, _, w, thermals = min(cand, key=lambda c: (c[0] - cx) ** 2 + (c[1] - cy) ** 2)
+        fill = kid(z, 'fill')
+        if fill is None:
+            continue
+        mt = kid(z, 'min_thickness'); mthick = float(mt[1]) if mt else 0.0
+        changed = False
+        if gap:
+            tg = kid(fill, 'thermal_gap')
+            if tg is not None and abs(float(tg[1]) - gap) > 1e-4:
+                tg[1] = f'{gap:g}'; changed = True
+        if w:
+            sw = max(w, mthick)
+            tb = kid(fill, 'thermal_bridge_width')
+            if tb is not None and abs(float(tb[1]) - sw) > 1e-4:
+                tb[1] = f'{sw:g}'; changed = True
+        cp = kid(z, 'connect_pads')
+        if cp is not None and not thermals and 'yes' not in cp:
+            cp.insert(1, 'yes'); changed = True               # Eagle thermals="no": solid connection
+        n += changed
+    return n, f'(gap {gap} mm = slThermalIsolate, spoke = polygon width)' if gap else '(spoke = polygon width)'
 
 def _fp_copy(pcbnew, fp):
     for f in (lambda: pcbnew.FOOTPRINT(fp), lambda: fp.Duplicate(), lambda: fp.Duplicate(False)):
@@ -2232,6 +2364,262 @@ def add_milling(pcb_path, ebrd, dry):
         pcbnew.SaveBoard(pcb_path, board)
 
 
+# --------------------------------------------------------------------------- plated milled slots
+
+def _circ3(a, b, c):
+    ax, ay = a; bx, by = b; cx, cy = c
+    d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+    if abs(d) < 1e-12:
+        return None
+    ux = ((ax * ax + ay * ay) * (by - cy) + (bx * bx + by * by) * (cy - ay) + (cx * cx + cy * cy) * (ay - by)) / d
+    uy = ((ax * ax + ay * ay) * (cx - bx) + (bx * bx + by * by) * (ax - cx) + (cx * cx + cy * cy) * (bx - ax)) / d
+    return ux, uy, math.hypot(ax - ux, ay - uy)
+
+
+def _arc_pts(a, m, b, n=16):
+    c = _circ3(a, m, b)
+    if c is None:
+        return [a, b]
+    ux, uy, r = c
+    t0, tm, t1 = (math.atan2(p[1] - uy, p[0] - ux) for p in (a, m, b))
+    def norm(t):
+        return (t - t0) % (2 * math.pi)
+    sweep = norm(t1)
+    if norm(tm) > sweep:                       # mid not on the CCW way -> go the other way
+        sweep -= 2 * math.pi
+    return [(ux + r * math.cos(t0 + sweep * i / n), uy + r * math.sin(t0 + sweep * i / n)) for i in range(n + 1)]
+
+
+def _xy(n):
+    return float(n[1]), float(n[2])
+
+
+def _contours(items):
+    """fp_line / fp_arc (footprint-local) -> list of (items, closed polygon points)."""
+    segs = []
+    for it in items:
+        a, b = _xy(kid(it, 'start')), _xy(kid(it, 'end'))
+        pts = _arc_pts(a, _xy(kid(it, 'mid')), b) if it[0] == 'fp_arc' else [a, b]
+        segs.append((it, pts))
+    key = lambda p: (round(p[0], 3), round(p[1], 3))
+    par = list(range(len(segs)))
+    def f(i):
+        while par[i] != i:
+            par[i] = par[par[i]]; i = par[i]
+        return i
+    ends = {}
+    for i, (_, pts) in enumerate(segs):
+        for p in (pts[0], pts[-1]):
+            if key(p) in ends:
+                par[f(i)] = f(ends[key(p)])
+            ends[key(p)] = i
+    groups = defaultdict(list)
+    for i in range(len(segs)):
+        groups[f(i)].append(i)
+    out = []
+    for idx in groups.values():
+        rest = [segs[i] for i in idx]
+        it0, chain = rest.pop(0)
+        poly = list(chain); used = [it0]
+        while rest:
+            for j, (it, pts) in enumerate(rest):
+                if key(pts[0]) == key(poly[-1]):
+                    poly += pts[1:]; break
+                if key(pts[-1]) == key(poly[-1]):
+                    poly += list(reversed(pts))[1:]; break
+            else:
+                break
+            used.append(it); rest.pop(j)
+        if not rest and key(poly[0]) == key(poly[-1]) and len(poly) > 3:
+            out.append((used, poly[:-1]))
+    return out
+
+
+def _stadium_pts(c1, c2, r, n=12):
+    """Boundary samples of a stadium (end-cap centres c1, c2, radius r)."""
+    (x1, y1), (x2, y2) = c1, c2
+    L = math.hypot(x2 - x1, y2 - y1)
+    ux, uy = ((x2 - x1) / L, (y2 - y1) / L) if L > 1e-9 else (1.0, 0.0)
+    nx, ny = -uy, ux
+    a, b = [], []                                # ordered outline: cap 2, then cap 1
+    for i in range(n + 1):
+        t = -math.pi / 2 + math.pi * i / n
+        ct, st = math.cos(t), math.sin(t)
+        a.append((x2 + r * (ux * ct + nx * st), y2 + r * (uy * ct + ny * st)))
+        b.append((x1 - r * (ux * ct + nx * st), y1 - r * (uy * ct + ny * st)))
+    return a + b
+
+
+def _in_stadium(p, c1, c2, r):
+    (x1, y1), (x2, y2) = c1, c2
+    dx, dy = x2 - x1, y2 - y1
+    L2 = dx * dx + dy * dy
+    t = 0 if L2 == 0 else max(0, min(1, ((p[0] - x1) * dx + (p[1] - y1) * dy) / L2))
+    return math.hypot(p[0] - x1 - t * dx, p[1] - y1 - t * dy) <= r + 1e-6
+
+
+def _stadium_cover(poly, arcs, tol=0.02):
+    """Decompose a milled contour into axis-aligned stadiums (oval drills): every convex end cap
+    (an arc whose centre lies inside the contour) is extended along the axis away from its opening
+    as far as the stadium stays inside the contour. Returns [(c1, c2, r)] or None when the stadiums
+    do not reproduce the contour (inside >= 99 %, contour covered >= 97 %)."""
+    def inside_shrunk(c1, c2, r):
+        return all(_pip(x, y, poly) for x, y in _stadium_pts(c1, c2, max(r - tol, 0.001)))
+    def dseg(p, a, b):
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        L2 = dx * dx + dy * dy
+        t = 0 if L2 == 0 else max(0, min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / L2))
+        return math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy)
+    def exact_inside(c1, c2, r):
+        for q in _stadium_pts(c1, c2, r, 24):
+            if not _pip(q[0], q[1], poly) and min(dseg(q, poly[i - 1], poly[i]) for i in range(len(poly))) > 0.003:
+                return False
+        return True
+    cands = []
+    for (cx, cy, r, vx, vy) in arcs:
+        if not _pip(cx, cy, poly):
+            continue                                 # concave fillet
+        dirs = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+        dirs.sort(key=lambda d: d[0] * vx + d[1] * vy)   # most opposite to the cap's bulge first
+        for d in dirs[:2]:
+            L, step = 0.0, 0.01
+            while L < 20 and inside_shrunk((cx, cy), (cx + d[0] * (L + step), cy + d[1] * (L + step)), r):
+                L += step
+            # exact length: shrink until the true stadium is inside (3 um tolerance), then snap to a
+            # partner end cap of the same radius if one is that close
+            while L > 0 and not exact_inside((cx, cy), (cx + d[0] * L, cy + d[1] * L), r):
+                L = round(L - 0.001, 4)
+            for (px_, py_, pr, _, _) in arcs:
+                if abs(pr - r) < 0.005 and abs((px_ - cx) * d[1]) + abs((py_ - cy) * d[0]) < 0.005:
+                    Lp = (px_ - cx) * d[0] + (py_ - cy) * d[1]
+                    if Lp > 0 and abs(Lp - L) < 0.03:
+                        L = Lp
+            c1, c2 = (cx, cy), (round(cx + d[0] * L, 4), round(cy + d[1] * L, 4))
+            if inside_shrunk(c1, c2, r):
+                cands.append((tuple(sorted([c1, c2])), r))
+    cands = list({(c, round(r, 4)): (c, r) for c, r in cands}.values())
+    if not cands:
+        return None
+    xs = [p[0] for p in poly]; ys = [p[1] for p in poly]
+    grid = [(x0, y0) for x0 in [min(xs) + i * 0.01 for i in range(int((max(xs) - min(xs)) / 0.01) + 1)]
+            for y0 in [min(ys) + j * 0.01 for j in range(int((max(ys) - min(ys)) / 0.01) + 1)] if _pip(x0, y0, poly)]
+    if not grid:
+        return None
+    chosen, left = [], set(range(len(grid)))
+    while left:
+        best = max(cands, key=lambda c: sum(1 for i in left if _in_stadium(grid[i], c[0][0], c[0][1], c[1])))
+        got = {i for i in left if _in_stadium(grid[i], best[0][0], best[0][1], best[1])}
+        if len(got) < 0.01 * len(grid):
+            break
+        chosen.append(best); left -= got
+    if len(left) > 0.03 * len(grid):
+        return None
+    return [(c[0][0], c[0][1], c[1]) for c in chosen]
+
+
+def _pad_prims_local(pad, fpang):
+    """Custom pad primitives -> footprint-local polygons."""
+    at = kid(pad, 'at'); px, py = float(at[1]), float(at[2])
+    a = math.radians((float(at[3]) if len(at) > 3 else 0.0) - fpang)
+    ca, sa = math.cos(a), math.sin(a)
+    out = []
+    for gp in kids(kid(pad, 'primitives') or [], 'gr_poly'):
+        pts = [(float(q[1]), float(q[2])) for q in kids(kid(gp, 'pts'), 'xy')]
+        out.append([(px + x * ca + y * sa, py - x * sa + y * ca) for x, y in pts])
+    return out
+
+
+def _bbox_hit(pts, bb, m=0.3):
+    return any(bb[0] - m <= x <= bb[1] + m and bb[2] - m <= y <= bb[3] + m for x, y in pts)
+
+
+def plated_milling_slots(pcb_path, dry):
+    """Eagle idiom for a PLATED slot (USB-C shell legs, power jacks): a milled contour (layer 46)
+    inside a package, copper polygons around it on BOTH outer layers (the top one carrying the
+    signal of a tiny SMD), and drill holes inside the contour for the drill file. KiCad got a
+    non-plated Edge.Cuts cut-out + NPTH + net-less bottom copper (hole_clearance,
+    copper_edge_clearance, solder_mask_bridge errors, and an unplated leg at the fab).
+    Rebuilt as PTH pads with oval drills that reproduce the contour, the pad number/net of the
+    SMD, and the package copper as the pad shape. Contours that are not made of oval slots, or
+    without copper on both sides, stay a cut-out (reported)."""
+    R.h('PCB: Eagle plated milled slots (copper on both sides around layer-46 milling) -> PTH oval drills')
+    tree = read_sx(pcb_path)
+    n_fp = n_slot = n_pad = 0; kept = []
+    for fp in kids(tree, 'footprint'):
+        edge = [x for x in fp if isinstance(x, list) and x and x[0] in ('fp_line', 'fp_arc')
+                and kid(x, 'layer') is not None and str(kid(x, 'layer')[1]) == 'Edge.Cuts']
+        if not edge:
+            continue
+        at = kid(fp, 'at'); fpang = float(at[3]) if len(at) > 3 else 0.0
+        ref = prop_val(fp, 'Reference', '?')
+        bpolys = [x for x in fp if isinstance(x, list) and x and x[0] == 'fp_poly'
+                  and str(kid(x, 'layer')[1]) == 'B.Cu']
+        fpads = [p for p in kids(fp, 'pad') if len(p) > 3 and str(p[3]) == 'custom' and kid(p, 'net') is not None
+                 and 'F.Cu' in [str(v) for v in (kid(p, 'layers') or [])[1:]]]
+        changed = False
+        for used, poly in _contours(edge):
+            xs = [p[0] for p in poly]; ys = [p[1] for p in poly]; bb = (min(xs), max(xs), min(ys), max(ys))
+            fcu = [p for p in fpads if any(_bbox_hit(g, bb) for g in _pad_prims_local(p, fpang))]
+            bcu = [x for x in bpolys if _bbox_hit([(float(q[1]), float(q[2])) for q in kids(kid(x, 'pts'), 'xy')], bb)]
+            if not fcu or not bcu:
+                continue                              # not copper on both sides: a real cut-out
+            arcs = []
+            for it in used:
+                if it[0] != 'fp_arc':
+                    continue
+                a, m, b = _xy(kid(it, 'start')), _xy(kid(it, 'mid')), _xy(kid(it, 'end'))
+                c = _circ3(a, m, b)
+                if c:
+                    arcs.append((round(c[0], 4), round(c[1], 4), round(c[2], 4), m[0] - c[0], m[1] - c[1]))
+            # group quarter arcs of one cap
+            caps = {}
+            for cx, cy, r, vx, vy in arcs:
+                k = (round(cx, 3), round(cy, 3), round(r, 3))
+                o = caps.get(k, (cx, cy, r, 0.0, 0.0))
+                caps[k] = (cx, cy, r, o[3] + vx, o[4] + vy)
+            cover = _stadium_cover(poly, list(caps.values()))
+            if not cover:
+                kept.append(f'{ref} ({len(poly)}-point contour)'); continue
+            src = fcu[0]
+            num, net = src[1], kid(src, 'net')
+            prims = [[(float(q[1]), float(q[2])) for q in kids(kid(x, 'pts'), 'xy')] for x in bcu]
+            for c1, c2, r in cover:
+                cx, cy = (c1[0] + c2[0]) / 2, (c1[1] + c2[1]) / 2
+                w = abs(c2[0] - c1[0]) + 2 * r; h = abs(c2[1] - c1[1]) + 2 * r
+                drill = ['drill', 'oval', f'{w:.4f}', f'{h:.4f}'] if abs(w - h) > 1e-4 else ['drill', f'{w:.4f}']
+                # the package copper is a ring around the slot: KiCad wants ONE solid polygon per
+                # custom pad -> add every slot stadium of this contour as filled primitives
+                solid = prims + [_stadium_pts(a_, b_, r_ + 0.001, 16) for a_, b_, r_ in cover]
+                prim = ['primitives'] + [['gr_poly', ['pts'] + [['xy', f'{x - cx:.6f}', f'{y - cy:.6f}'] for x, y in pg],
+                                          ['width', '0'], ['fill', 'yes']] for pg in solid]
+                pad = ['pad', num, 'thru_hole', 'custom', ['at', f'{cx:.4f}', f'{cy:.4f}'] + ([f'{fpang:g}'] if fpang else []),
+                       ['size', f'{w:.4f}', f'{h:.4f}'], drill, ['layers', Q('*.Cu'), Q('*.Mask')],
+                       ['remove_unused_layers', 'yes'], ['keep_end_layers', 'yes'], net,
+                       ['zone_connect', '2'], ['options', ['clearance', 'outline'], ['anchor', 'circle']], prim,
+                       ['uuid', Q(new_uuid())]]
+                fp.append(pad); n_pad += 1
+            for it in used:
+                fp.remove(it)
+            for x in bcu:
+                if x in fp:
+                    fp.remove(x)
+            for p in [p for p in kids(fp, 'pad') if len(p) > 2 and str(p[2]) == 'np_thru_hole']:
+                pa = kid(p, 'at')
+                if _pip(float(pa[1]), float(pa[2]), poly):
+                    fp.remove(p)
+            n_slot += 1; changed = True
+        n_fp += changed
+    R.p(f'{n_slot} milled contours in {n_fp} footprints -> {n_pad} plated pads with oval drills '
+        '(Eagle: copper + milling on both sides = plated slot; KiCad: PTH, drill file plated)')
+    if kept:
+        R.p('kept as NON-plated cut-out (not made of oval slots - check against the part datasheet): ' + ', '.join(kept))
+    WARNINGS['plated_slots_converted'] = n_slot
+    if kept:
+        WARNINGS['plated_slots_kept'] = len(kept)
+    if not dry and n_slot:
+        write_sx(pcb_path, tree)
+
+
 def footprint_library(pcb_path, proj_dir, nick, sheets, dry):
     R.h('PCB: project footprint library + re-link')
     try:
@@ -2439,6 +2827,181 @@ def verify_sch_values(esch, sheets):
         f'{n_missing} missing' + ((': ' + ', '.join(bad[:10])) if bad else ''))
 
 
+SCH_ATTR = {}
+ATTR_SKIP = {'NAME', 'VALUE', 'PART', 'GATE', 'SHEET', 'DRAWING_NAME', 'LAST_DATE_TIME', 'PLOT_DATE_TIME'}
+
+
+def eagle_part_attrs(esch):
+    """Eagle part -> {attribute: value} as Eagle uses it: the device technology's attributes,
+    overridden by the part's own <attribute> (empty values dropped)."""
+    root = eagle_root(esch)
+    sch = root.find('drawing/schematic')
+    tech = {}
+    for lib in sch.findall('libraries/library'):
+        for ds in lib.findall('devicesets/deviceset'):
+            for dev in ds.findall('devices/device'):
+                for t in dev.findall('technologies/technology'):
+                    tech[(lib.get('name'), ds.get('name'), dev.get('name', ''), t.get('name', ''))] = \
+                        {a.get('name'): a.get('value') or '' for a in t.findall('attribute')}
+    out = {}
+    for p in sch.findall('parts/part'):
+        a = dict(tech.get((p.get('library'), p.get('deviceset'), p.get('device', ''), p.get('technology', '')), {}))
+        for at in p.findall('attribute'):
+            a[at.get('name')] = at.get('value') or ''
+        a = {k: v for k, v in a.items() if k and v.strip() and k.upper() not in ATTR_SKIP}
+        if a:
+            out[p.get('name')] = a
+    return out
+
+
+def _kicad_net_escape(n):
+    """KiCad stores '/' inside an auto net name as {slash} (the netlist export shows it plain)."""
+    m = re.match(r'^((?:Net|unconnected)-\()(.*)(\))$', n)
+    return m.group(1) + m.group(2).replace('/', '{slash}') + m.group(3) if m else n
+
+
+def sync_pcb_to_sch(cli, root_sch, pcb_path, pro_path, sheets, tmpdir, dry):
+    """What 'Update PCB from Schematic' would change WITHOUT touching copper: Eagle auto nets (N$..)
+    get the schematic's net name, pads the schematic leaves unconnected get their 'unconnected-(..)'
+    net, and symbol fields (PARTNR, MPN, ...) are copied to the footprints. Removes the parity
+    warnings (net_conflict, footprint_symbol_field_mismatch); connectivity is not changed - the
+    QC compares pads, not names."""
+    R.h('PCB: sync net names and fields from the schematic (no copper change)')
+    nets, _ = kicad_sch_netlist(cli, root_sch, tmpdir)
+    if not nets:
+        R.p('schematic netlist not available - skipped'); return
+    node_sch = {}
+    for name, nodes in nets.items():
+        nm = name.rsplit('/', 1)[-1] if name.startswith('/') else name
+        for nd in nodes:
+            node_sch[nd] = _kicad_net_escape(nm)
+    fields = {}
+    for sh in sheets:
+        for inst in sh.instances():
+            props = [(str(pp[1]), str(pp[2])) for pp in kids(inst, 'property') if len(pp) > 2]
+            for r in _inst_refs(inst):
+                fields.setdefault(r, {}).update({k: v for k, v in props if v.strip() and k not in (
+                    'Reference', 'Value', 'Footprint', 'Datasheet', 'Description', 'Intersheetrefs', 'ki_keywords',
+                    'ki_fp_filters', 'ki_locked')})
+    tree = read_sx(pcb_path)
+    pcb_to_sch = defaultdict(set); netless = []
+    for fp in kids(tree, 'footprint'):
+        ref = prop_val(fp, 'Reference', '')
+        for pd in kids(fp, 'pad'):
+            nn = kid(pd, 'net'); sn = node_sch.get((ref, str(pd[1])))
+            if nn is not None:
+                if sn: pcb_to_sch[str(nn[1])].add(sn)
+            elif sn and sn.startswith('unconnected-('):
+                netless.append((pd, sn))
+    used = set(pcb_to_sch)
+    ren = {}
+    for pn, sns in pcb_to_sch.items():
+        if pn.startswith('N$') and len(sns) == 1:
+            sn = next(iter(sns))
+            if sn != pn and sn not in used and sn not in ren.values():
+                ren[pn] = sn
+    def walk(n):
+        for x in n:
+            if isinstance(x, list) and x:
+                if x[0] == 'net' and len(x) == 2 and str(x[1]) in ren:
+                    x[1] = Q(ren[str(x[1])])
+                else:
+                    walk(x)
+    walk(tree)
+    for pd, sn in netless:
+        pd.append(['net', Q(sn)])
+    n_f = 0; differ = []
+    for fp in kids(tree, 'footprint'):
+        ref = prop_val(fp, 'Reference', '')
+        have = {str(pp[1]) for pp in kids(fp, 'property')}
+        for pp in kids(fp, 'property'):
+            k = str(pp[1])
+            if len(pp) > 2 and k in fields.get(ref, {}) and str(pp[2]).strip() and str(pp[2]).strip() != fields[ref][k].strip():
+                differ.append((ref, k, str(pp[2]), fields[ref][k]))
+        last = max([i for i, x in enumerate(fp) if isinstance(x, list) and x and x[0] == 'property'] or [3])
+        for k, v in fields.get(ref, {}).items():
+            if k not in have:
+                last += 1
+                fp.insert(last, ['property', Q(k), Q(v), ['at', '0', '0', '0'], ['layer', Q('F.Fab')], ['hide', 'yes'],
+                              ['uuid', Q(new_uuid())], ['effects', ['font', ['size', '1', '1'], ['thickness', '0.15']]]])
+                n_f += 1
+    R.p(f'{len(ren)} Eagle auto nets (N$..) renamed to the schematic name, {len(netless)} unconnected pads '
+        f'got their schematic net, {n_f} symbol fields copied to footprints')
+    if differ:
+        WARNINGS['eagle_sch_brd_attr_mismatch'] = len(differ)
+        R.p(f'**WARNING: the Eagle .sch and .brd disagree on {len(differ)} part attributes** (kept as in each '
+            'Eagle file - decide which is right before ordering parts; KiCad "Update PCB from Schematic" '
+            'would copy the schematic value): ' + ', '.join(f'{r}.{k} brd `{b}` / sch `{c}`' for r, k, b, c in differ[:20])
+            + (' ...' if len(differ) > 20 else ''))
+    if dry:
+        return
+    write_sx(pcb_path, tree)
+    if ren and os.path.isfile(pro_path):                  # net class assignments follow the rename
+        with open(pro_path, encoding='utf-8') as f:
+            pro = json.load(f)
+        for pt in pro.get('net_settings', {}).get('netclass_patterns', []) or []:
+            if pt.get('pattern') in ren:
+                pt['pattern'] = ren[pt['pattern']]
+        with open(pro_path, 'w', encoding='utf-8') as f:
+            json.dump(pro, f, indent=2)
+
+
+def fix_attr_fields(esch, sheets, dry):
+    """Eagle attributes the KiCad importer drops: DESCRIPTION collides with KiCad's built-in
+    Description field (left empty), so it is copied there; any other missing attribute is added as
+    a hidden field (BOM data must survive the conversion)."""
+    R.h('SCH: Eagle part attributes -> symbol fields')
+    attrs = eagle_part_attrs(esch) if esch else {}
+    n_desc = n_add = 0
+    for sh in sheets:
+        for inst in sh.instances():
+            refs = _inst_refs(inst)
+            ea = next((attrs[p] for p in attrs if kref(p) in refs), None)
+            if not ea:
+                continue
+            props = {str(pp[1]): pp for pp in kids(inst, 'property') if len(pp) > 2}
+            at = kid(inst, 'at')
+            for k, v in ea.items():
+                if k in props:
+                    continue
+                if k.upper() == 'DESCRIPTION' and 'Description' in props:
+                    if not str(props['Description'][2]).strip():
+                        props['Description'][2] = Q(v); sh.dirty = True; n_desc += 1
+                    continue
+                inst.append(['property', Q(k), Q(v), ['at', str(at[1]), str(at[2]), '0'], ['hide', 'yes'],
+                             ['effects', ['font', ['size', '1.27', '1.27']]]])
+                sh.dirty = True; n_add += 1
+    R.p(f'{n_desc} Eagle DESCRIPTION attributes -> KiCad Description field, {n_add} missing attributes added as fields')
+
+
+def verify_sch_attrs(esch, sheets):
+    """Eagle part attributes (PARTNR, MPN, MANUFACTURER, supplier numbers ...) vs KiCad symbol
+    fields - the BOM data of the design; a lost attribute is a QC FAIL."""
+    kf = {}
+    for sh in sheets:
+        for inst in sh.instances():
+            props = {str(pp[1]): str(pp[2]) for pp in kids(inst, 'property') if len(pp) > 2}
+            for r in _inst_refs(inst):
+                kf.setdefault(r, {}).update(props)
+    n = 0; missing = []; differ = []
+    for part, attrs in eagle_part_attrs(esch).items():
+        r = kref(part)
+        if r not in kf:
+            continue                                # supply / frame: checked elsewhere
+        for k, v in attrs.items():
+            n += 1
+            kv = kf[r].get(k)
+            if kv is None and k.upper() == 'DESCRIPTION':
+                kv = kf[r].get('Description')
+            if kv is None:
+                missing.append(f'{r}.{k}')
+            elif kv.strip() != v.strip():
+                differ.append(f'{r}.{k} Eagle `{v}` KiCad `{kv}`')
+    SCH_ATTR.update(checked=n, missing=len(missing), differ=len(differ))
+    R.p(f'**Eagle part attributes vs KiCad symbol fields**: {n} attribute values, {len(missing)} missing, '
+        f'{len(differ)} differ' + ((': ' + ', '.join((missing + differ)[:10])) if missing or differ else ''))
+
+
 def qc_verdict(selftest_ok=None, geom=None):
     """Strict quality-control verdict: anything that is not identical to the Eagle source is a FAIL."""
     R.h('QC VERDICT (strict)')
@@ -2458,6 +3021,8 @@ def qc_verdict(selftest_ok=None, geom=None):
                 fails.append(f'geometry: {v} {k}')
     if SCH_VAL.get('bad'):
         fails.append(f"schematic values: {SCH_VAL['bad']} differences")
+    if SCH_ATTR.get('missing') or SCH_ATTR.get('differ'):
+        fails.append(f"part attributes: {SCH_ATTR.get('missing', 0)} missing, {SCH_ATTR.get('differ', 0)} differ")
     if CLASH:
         fails.append('reference collision: ' + ', '.join(f'{n}/{kref(n)}' for n in CLASH))
     if selftest_ok is False:
@@ -2838,9 +3403,11 @@ def main():
             compare_nets(truth_s or truth_b, net, 'Eagle schematic vs KiCad schematic')
             if esch and tag != 'before':
                 try:
-                    verify_sch_values(esch, [Sheet(p) for p in sorted(glob.glob(os.path.join(d, '*.kicad_sch')))])
+                    shs = [Sheet(p) for p in sorted(glob.glob(os.path.join(d, '*.kicad_sch')))]
+                    verify_sch_values(esch, shs)
+                    verify_sch_attrs(esch, shs)
                 except Exception as ex:
-                    R.p(f'schematic value check failed: {ex}')
+                    R.p(f'schematic value / attribute check failed: {ex}')
         if has_pcb and truth_b:
             compare_nets(truth_b, kicad_pcb_padnets(read_sx(pcb)), 'Eagle board vs KiCad PCB pads')
             if tag != 'before':
@@ -2854,15 +3421,27 @@ def main():
         if e:
             c = erc_summary(e); print_counter('ERC', c)
             m['erc'] = {f'{t}/{sv}': n for (t, sv), n in c.items()}
+            if tag != 'before':
+                _save_json(e, os.path.join(d, 'eaglefix_erc.json'))
         if has_pcb:
             dr = drc_run(cli, pcb, tmpdir)
             if dr:
                 c = drc_summary(dr); print_counter('DRC (+schematic parity)', c)
                 m['drc'] = {f'{t}/{sv}': n for (t, sv), n in c.items()}
+                if tag != 'before':
+                    _save_json(dr, os.path.join(d, 'eaglefix_drc.json'))
+                    ap = eagle_approved_errors(ebrd)
+                    if ap:
+                        m['eagle_approved_drc'] = sum(ap.values())
+                        R.p(f'Eagle original: {sum(ap.values())} DRC errors approved by the designer in the .brd '
+                            '(code,layer: ' + ', '.join(f'{k} x{v}' for k, v in ap.most_common(8)) + ') - '
+                            'compare before treating DRC items as conversion errors')
         if tag != 'before' and GEOM_LOG:
             m['geometry'] = dict(GEOM_LOG[-1])
         if tag != 'before' and SCH_VAL:
             m['sch_values'] = dict(SCH_VAL)
+        if tag != 'before' and SCH_ATTR:
+            m['sch_attrs'] = dict(SCH_ATTR)
         return comps
 
     progress(2, 'Quality control: comparing the project with the Eagle source' if a.verify_only
@@ -2898,6 +3477,8 @@ def main():
 
     progress(9, 'Fixing the schematic')
     fix_power_values(sheets, esch)
+    if esch:
+        fix_attr_fields(esch, sheets, a.dry_run)
     if not a.no_label_globalize:
         fix_local_labels(sheets)
     fix_pinless(sheets)
@@ -2913,6 +3494,7 @@ def main():
         if ebrd:
             trim_empty_inner_layers(pcb, ebrd, a.dry_run)
             add_milling(pcb, ebrd, a.dry_run)
+            plated_milling_slots(pcb, a.dry_run)
         assign_orphan_pads(pcb, a.dry_run)
         nicks = Counter()
         for sh in sheets:
@@ -2947,6 +3529,10 @@ def main():
         progress(33, 'No-connect flags')
         add_no_connects(cli, root_sch, sheets, tmpdir, eagle_sch_truth(esch) if esch else None)
         for s in sheets: s.save()
+        if has_pcb:
+            sheets = [Sheet(p) for p in sorted(glob.glob(os.path.join(d, '*.kicad_sch')))]
+            progress(36, 'Net names and fields schematic -> PCB')
+            sync_pcb_to_sch(cli, root_sch, pcb, pro, sheets, tmpdir, a.dry_run)
 
     if not a.dry_run:
         progress(39, 'Quality control: comparing the result with the Eagle source')
