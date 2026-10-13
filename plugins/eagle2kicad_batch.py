@@ -326,7 +326,7 @@ def convert(src, target, timeout, brd=None, method='cli'):
     return meta
 
 
-def run_fix(target, sch, brd, meta=None):
+def run_fix(target, sch, brd, meta=None, origin=None):
     src_dir = os.path.join(target, 'eagle_source')
     os.makedirs(src_dir, exist_ok=True)
     args = []
@@ -337,7 +337,7 @@ def run_fix(target, sch, brd, meta=None):
         args += ['--import-meta', json.dumps(meta)]
     try:                                            # EAGLE manufacturing files next to the design -> Gerber check
         from gerber_compare import find_mfg
-        mfg = find_mfg(brd or sch)
+        mfg = find_mfg(origin or brd or sch)        # origin: the original file of a converted binary
     except Exception:
         mfg = None
     if mfg:
@@ -404,6 +404,7 @@ def main():
         label = os.path.relpath(base)
         if not sch:
             log(f'SKIP {label}: no .sch'); rows.append((label, 'SKIP', 'no .sch', {})); continue
+        origin = brd or sch
         binary = [f for f in (sch, brd) if f and is_binary_eagle(f)]
         if binary:
             # binary EAGLE (<= 5.x): convert to EAGLE XML first; KiCad imports the XML copies
@@ -434,7 +435,7 @@ def main():
             if binfo:
                 meta['binary_source'] = eagle_bin_summary(binfo)
             t_f = time.time()
-            rc, out = run_fix(target, sch, brd, meta)
+            rc, out = run_fix(target, sch, brd, meta, origin)
             log(f'    fix {time.time() - t_f:.0f} s, convert {meta["convert_total_s"]} s ({meta["method"]})')
             res = summarize(out)
             log(f'    fix exit {rc}, {time.time() - t0:.0f} s total')

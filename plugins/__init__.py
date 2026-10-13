@@ -864,6 +864,7 @@ class Eagle2KiCadImport(pcbnew.ActionPlugin):
                 return
             src = dlg.GetPath()
             dlg.Destroy()
+            orig_src = src
             src, bin_info = _binary_sources(src)
             if src is None:
                 return
@@ -875,7 +876,7 @@ class Eagle2KiCadImport(pcbnew.ActionPlugin):
             job = FixJob(mgr, src, pro)
             job.bin_info = bin_info
             job.other_project = other_project
-            job.mfg = _ask_mfg(src)
+            job.mfg = _ask_mfg(orig_src)
             wx.CallAfter(job.start)
             return
         dlg = wx.FileDialog(None, 'Eagle schematic / board (.sch, .brd)',
@@ -914,9 +915,7 @@ class Eagle2KiCadImport(pcbnew.ActionPlugin):
             target = base if (os.path.isdir(base) and not os.listdir(base)) else free(base)
         os.makedirs(target, exist_ok=True)
         job = ImportJob(mgr, mid, src, target)
-        job.mfg = _ask_mfg(src)
-
-
+        job.mfg = _ask_mfg(orig_src)   # next to the original files (a binary source is converted elsewhere)
         job.bin_info = bin_info
         wx.CallAfter(job.start)        # leave the PCB frame's event handler first: KiCad closes it
 
