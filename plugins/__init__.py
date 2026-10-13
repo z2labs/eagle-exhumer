@@ -21,7 +21,7 @@ import wx
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-VERSION = '0.9.11'
+VERSION = '0.9.12'
 
 _ACTIVE = []          # keep running jobs referenced after the PCB frame closes
 
