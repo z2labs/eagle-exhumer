@@ -9,7 +9,7 @@ the editor and in the BOM.
 This script copies the ``Value`` of the schematic instances onto the library
 symbol they point at, for **every component that appears in the project BOM**:
 
-* the symbol definition in ``KrakenSDR_3v3-eagle-import.kicad_sym``, and
+* the symbol definition in ``<project>-eagle-import.kicad_sym``, and
 * the ``lib_symbols`` cache of every sheet that holds a copy of it,
 
 so library and schematics stay in sync.  A symbol whose instances disagree on the
@@ -18,7 +18,7 @@ unless ``--force`` picks the most common one.
 
 Usage::
 
-    python tools/task1b_set_value_in_lib_symbols.py [--dry-run] [--no-backup] [--force]
+    python set_value.py [--dry-run] [--no-backup] [--force]
 """
 
 from __future__ import annotations
@@ -98,7 +98,7 @@ def patch_sheet_caches(sheets, value_of: dict, dry_run: bool) -> int:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--dry-run', action='store_true', help='report only, write nothing')
-    ap.add_argument('--no-backup', action='store_true', help='skip the tools/_backup copy')
+    ap.add_argument('--no-backup', action='store_true', help='skip the _eaglefix_backup/libfix copy')
     ap.add_argument('--force', action='store_true',
                     help='also patch symbols whose instances disagree on Value')
     args = ap.parse_args(argv)

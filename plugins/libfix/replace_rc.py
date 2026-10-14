@@ -2,7 +2,7 @@
 """Task #2 - point every R/L/C instance at its own unique symbol.
 
 For every ``R*`` / ``C*`` / ``L*`` instance of every ``*.kicad_sch`` in
-``CAD/KrakenSDR_3v4`` the ``(lib_id ...)`` is replaced by the unique symbol
+the converted project the ``(lib_id ...)`` is replaced by the unique symbol
 created by task #1 (``<base>_<Value>_<Footprint>``), and the sheet's
 ``lib_symbols`` cache is kept consistent:
 
@@ -15,7 +15,7 @@ point at a symbol carrying their own ``MPN`` are left alone.
 
 Usage::
 
-    python tools/task2_replace_rc_symbols.py [--dry-run] [--no-backup]
+    python replace_rc.py [--dry-run] [--no-backup]
 """
 
 from __future__ import annotations
@@ -118,7 +118,7 @@ def process_sheet(path: str, lib: SymbolLib, plan, log: list, dry_run: bool):
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--dry-run', action='store_true', help='report only, write nothing')
-    ap.add_argument('--no-backup', action='store_true', help='skip the tools/_backup copy')
+    ap.add_argument('--no-backup', action='store_true', help='skip the _eaglefix_backup/libfix copy')
     args = ap.parse_args(argv)
 
     log = ['# task 2 - replace R/L/C instances with their unique symbols', '']

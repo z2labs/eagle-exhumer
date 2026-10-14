@@ -4,7 +4,7 @@
 The imported Eagle library only carries generic symbols (``RES-SMD-NEW``,
 ``C-EUC0603_DWS``, ``COILCRAFT_0603LS0603`` ...) reused by dozens of parts with
 different values and part numbers.  This script walks every ``*.kicad_sch`` of
-``CAD/KrakenSDR_3v4``, collects the ``R*`` / ``C*`` / ``L*`` instances and
+the converted project, collects the ``R*`` / ``C*`` / ``L*`` instances and
 creates one library symbol per unique
 ``(base symbol, Value, Footprint, PARTNR)`` combination, named::
 
@@ -23,7 +23,7 @@ Existing symbols are left untouched, so the script is safe to re-run.
 
 Usage::
 
-    python tools/task1_make_unique_rc_symbols.py [--dry-run] [--no-backup]
+    python unique_rc_symbols.py [--dry-run] [--no-backup]
 """
 
 from __future__ import annotations
@@ -81,7 +81,7 @@ def build_new_blocks(lib, plan, cached_blocks, log):
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--dry-run', action='store_true', help='report only, write nothing')
-    ap.add_argument('--no-backup', action='store_true', help='skip the tools/_backup copy')
+    ap.add_argument('--no-backup', action='store_true', help='skip the _eaglefix_backup/libfix copy')
     args = ap.parse_args(argv)
 
     log = ['# task 1 - unique R/L/C symbols', '']

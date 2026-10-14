@@ -1,4 +1,4 @@
-"""Minimal KiCad s-expression reader used by the kraken symbol tools.
+"""Minimal KiCad s-expression reader used by the library clean-up tools.
 
 The KiCad 10 schematic / symbol files are plain s-expressions with quoted
 strings.  A tiny hand written parser is enough for our purposes and keeps the
@@ -186,6 +186,6 @@ def split_lib_id(lib_id: str) -> Tuple[str, str]:
 
 
 def footprint_leaf(footprint: str) -> str:
-    """``'KrakenSDR_3v3:C0603_DWS'`` -> ``'C0603_DWS'``."""
+    """``'Project:C0603_DWS'`` -> ``'C0603_DWS'``."""
     return footprint.rsplit(':', 1)[-1].strip()
 

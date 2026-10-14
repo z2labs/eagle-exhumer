@@ -457,7 +457,7 @@ def set_supplier_fields(block: str, slots, write_empty: bool = True) -> str:
 # safety / reporting
 # --------------------------------------------------------------------------- #
 def backup_files(paths: List[str], tag: str) -> str:
-    """Copy *paths* into ``tools/_backup/<stamp>_<tag>/`` and return that folder."""
+    """Copy *paths* into ``<project>/_eaglefix_backup/libfix/<stamp>_<tag>/`` and return that folder."""
     stamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
     target = os.path.join(BACKUP_ROOT, '%s_%s' % (stamp, tag))
     os.makedirs(target, exist_ok=True)
@@ -467,7 +467,7 @@ def backup_files(paths: List[str], tag: str) -> str:
 
 
 def write_report(tag: str, lines: List[str]) -> str:
-    """Write ``tools/<tag>.log`` with *lines* and return the path."""
+    """Write ``<project>/_eaglefix_backup/libfix/<tag>.log`` with *lines* and return the path."""
     os.makedirs(LOG_DIR, exist_ok=True)
     path = os.path.join(LOG_DIR, tag + '.log')
     with open(path, 'w', encoding='utf-8') as fh:

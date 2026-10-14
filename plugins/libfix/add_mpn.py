@@ -23,14 +23,14 @@ supplier name.  Unused slots are written empty so every patched symbol carries
 the same six fields; ``--no-empty-slots`` stops after the last populated one, and
 ``--all-symbols`` writes the empty block onto symbols that have no order code.
 
-Both jobs write to the symbol definition in ``KrakenSDR_3v3-eagle-import.kicad_sym``
+Both jobs write to the symbol definition in ``<project>-eagle-import.kicad_sym``
 and to the ``lib_symbols`` cache of every sheet that holds a copy, so library and
 schematics stay in sync.  A symbol that would need two different values for the
 same field is reported and left alone unless ``--force`` picks the most common.
 
 Usage::
 
-    python tools/task3_add_mpn_to_lib.py [--dry-run] [--no-backup] [--force]
+    python add_mpn.py [--dry-run] [--no-backup] [--force]
                                          [--no-empty-slots] [--all-symbols]
                                          [--mpn-only] [--supplier-only]
 """
@@ -201,7 +201,7 @@ def describe(slots) -> str:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--dry-run', action='store_true', help='report only, write nothing')
-    ap.add_argument('--no-backup', action='store_true', help='skip the tools/_backup copy')
+    ap.add_argument('--no-backup', action='store_true', help='skip the _eaglefix_backup/libfix copy')
     ap.add_argument('--force', action='store_true',
                     help='also patch symbols whose instances disagree on a field')
     ap.add_argument('--no-empty-slots', action='store_true',

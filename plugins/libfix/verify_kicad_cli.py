@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Validate ``CAD/KrakenSDR_3v4`` with ``kicad-cli`` and summarise the result.
+"""Validate the converted project with ``kicad-cli`` and summarise the result.
 
 Run it before and after the task scripts and compare the two reports::
 
-    python tools/verify_with_kicad_cli.py baseline
-    python tools/task1_make_unique_rc_symbols.py
-    python tools/task2_replace_rc_symbols.py
-    python tools/task3_add_mpn_to_lib.py
-    python tools/verify_with_kicad_cli.py after
+    python verify_kicad_cli.py baseline
+    python unique_rc_symbols.py
+    python replace_rc.py
+    python add_mpn.py
+    python verify_kicad_cli.py after
 
 Checks performed on every ``*.kicad_sch`` of the project:
 
@@ -15,8 +15,8 @@ Checks performed on every ``*.kicad_sch`` of the project:
 * ``kicad-cli sch export netlist`` - the whole hierarchy still elaborates
 * ``kicad-cli sym list``           - the symbol library still parses
 
-Outputs land in ``tools/_verify/<tag>/``; a short summary is written to
-``tools/verify_<tag>.log``.
+Outputs land in ``<project>/_eaglefix_backup/libfix/_verify/<tag>/``; a short summary is written to
+``<project>/_eaglefix_backup/libfix/verify_<tag>.log``.
 """
 
 from __future__ import annotations
@@ -29,9 +29,23 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from libfix_model import LIB_PATH, PROJECT_DIR, sheet_files, write_report
+from libfix_model import LIB_PATH, LOG_DIR, PROJECT_DIR, sheet_files, write_report
 
-KICAD_CLI = os.environ.get('KICAD_CLI', r'C:\Program Files\KiCad\10.0\bin\kicad-cli.exe')
+def _find_cli():
+    import glob, shutil
+    c = os.environ.get('KICAD_CLI')
+    if c:
+        return c
+    for p in [os.path.join(os.path.dirname(sys.executable), 'kicad-cli.exe'),
+              os.path.join(os.path.dirname(sys.executable), 'kicad-cli')] + \
+            sorted(glob.glob(os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Programs', 'KiCad', '*', 'bin', 'kicad-cli.exe')), reverse=True) + \
+            sorted(glob.glob(r'C:\Program Files\KiCad\*\bin\kicad-cli.exe'), reverse=True):
+        if os.path.isfile(p):
+            return p
+    return shutil.which('kicad-cli') or 'kicad-cli'
+
+
+KICAD_CLI = _find_cli()
 
 
 def run(args, out_path):
@@ -65,7 +79,7 @@ def main(argv=None) -> int:
                     help='only run ERC + netlist + BOM on the root sheet')
     args = ap.parse_args(argv)
 
-    out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '_verify', args.tag)
+    out_dir = os.path.join(LOG_DIR, '_verify', args.tag)
     os.makedirs(out_dir, exist_ok=True)
     log = ['# kicad-cli verification (%s)' % args.tag,
            'kicad-cli : %s' % KICAD_CLI, '']
