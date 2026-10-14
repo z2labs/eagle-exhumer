@@ -410,7 +410,10 @@ def main():
     rows = []
     for base, fs in sorted(find_designs(a.paths).items()):
         sch, brd = fs.get('sch'), fs.get('brd')
-        label = os.path.relpath(base)
+        try:
+            label = os.path.relpath(base)
+        except ValueError:                          # Windows: other drive than the working folder
+            label = base
         if not sch:
             log(f'SKIP {label}: no .sch'); rows.append((label, 'SKIP', 'no .sch', {})); continue
         origin = brd or sch
