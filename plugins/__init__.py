@@ -699,6 +699,16 @@ class ImportJob:
     def _finish(self, rc):
         self._stop_driver()
         wx.CallLater(500, self._save_log)
+        # Post-processing: run symbol library scripts after fix
+        try:
+            from post_process import post_process as run_post_process
+            self.log('\n2b) post-processing...')
+            pp_rc = run_post_process(self.target, no_verify=False)
+            self.log(f'    post-processing exit code: {pp_rc}')
+            if pp_rc != 0:
+                self.log(f'    WARNING: post-processing returned non-zero exit code {pp_rc}')
+        except Exception as ex:
+            self.log(f'    WARNING: post-processing failed: {type(ex).__name__}: {ex}')
         warn = self._warnings()
         rep = os.path.join(self.target, 'eaglefix_report.md')
         other = getattr(self, 'other_project', False)
