@@ -71,6 +71,12 @@ class WinUI:
         U.EnumWindows(self.EnumProc(cb), 0)
         return out
 
+    def window_titles(self):
+        out = []
+        for h in self.windows():
+            b = self.ct.create_unicode_buffer(512); self.U.GetWindowTextW(h, b, 512); out.append(b.value)
+        return out
+
     def menu_items(self, hwnd):
         """[(id, text, parent)] of every item in the native menu bar (recursive)."""
         out, U = [], self.U
@@ -244,7 +250,12 @@ def convert(src, target, timeout, brd=None, method='cli'):
                 raise RuntimeError('KiCad exited at start-up')
             time.sleep(0.5)
         if mgr is None:
-            raise RuntimeError('KiCad project manager window not found')
+            titles = ui.window_titles() if hasattr(ui, 'window_titles') else []
+            if any('setup' in t.lower() for t in titles):
+                raise RuntimeError('KiCad shows its first-run "KiCad Setup" window - start KiCad once by hand, '
+                                   'finish the setup, then run the batch again')
+            raise RuntimeError('KiCad project manager window not found'
+                               + (f' (KiCad windows: {", ".join(repr(t) for t in titles)})' if titles else ''))
         time.sleep(1.5)
         drv = ui.driver([gui_src, target], log=lambda s: log('   ', s.strip()), layer_mapping=not cli_pcb, timeout=120)
         drv.start()
