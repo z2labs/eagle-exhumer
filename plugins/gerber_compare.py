@@ -1038,9 +1038,28 @@ def compare_drills(he, hk, dx, dy, tol=0.03, dtol=0.02):
             known += 1
             if pe != pk_:
                 plat.append((x, y, d, pe, pk_))
+    # a KiCad slot (G85) drawn where EAGLE drilled pilot holes and milled the contour (Eagle Exhumer
+    # turns that idiom into a plated oval drill): the EAGLE holes inside the slot are the same opening
+    in_slot = []
+    slots = [(i, hk[i]) for i in range(len(hk)) if i not in used and hk[i][3]]
+    if slots and miss:
+        def inside(x, y, d, k):
+            ax, ay, kd, sl = k
+            ax, ay = ax + dx, ay + dy; bx, by = sl[0] + dx, sl[1] + dy
+            vx, vy = bx - ax, by - ay; L2 = vx * vx + vy * vy
+            u = 0 if L2 == 0 else max(0.0, min(1.0, ((x - ax) * vx + (y - ay) * vy) / L2))
+            return math.hypot(ax + u * vx - x, ay + u * vy - y) + d / 2 <= kd / 2 + tol
+        rest = []
+        for x, y, d in miss:
+            hit = next((i for i, k in slots if inside(x, y, d, k)), None)
+            if hit is None:
+                rest.append((x, y, d))
+            else:
+                in_slot.append((x, y, d)); used.add(hit)
+        miss = rest
     extra = [(hk[i][0] + dx, hk[i][1] + dy, hk[i][2]) for i in range(len(hk)) if i not in used]
     return dict(eagle=len(he), kicad=len(hk), matched=len(used), missing_in_kicad=miss, extra_in_kicad=extra,
-                diameter_differs=dia, plating_known=known, plating_differs=plat)
+                diameter_differs=dia, plating_known=known, plating_differs=plat, in_slot=in_slot)
 
 
 def brd_offset(brd_path, he):
@@ -1266,6 +1285,9 @@ def verdict(res, spot_min=0.05):
             fails.append(f"drill plating: {len(d['plating_differs'])} holes plated on one side only - "
                          + '; '.join(f"({x:.2f}, {y:.2f}) {dd:g} mm EAGLE {'PTH' if pe else 'NPTH'} / KiCad {'PTH' if pk else 'NPTH'}"
                                      for x, y, dd, pe, pk in d['plating_differs'][:5]))
+        if d.get('in_slot'):
+            infos.append(f"drill: {len(d['in_slot'])} EAGLE pilot holes lie inside KiCad plated slots (EAGLE milled "
+                         "contour with copper on both sides -> oval plated drill): same opening")
         if not d.get('plating_known'):
             infos.append('drill plating not compared: the EAGLE drill files do not mark plated / non-plated holes '
                          '(plating is checked against the .brd by the quality control)')

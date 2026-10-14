@@ -2034,10 +2034,34 @@ def verify_geometry(pcb_path, ebrd):
         if t.GetClass() == 'PCB_VIA':
             x, y = t.GetPosition().x / 1e6, t.GetPosition().y / 1e6
             k_holes[_cell(x, y)].append((x, y, t.GetDrillValue() / 1e6, True))
-    n_plating = n_hole_miss = 0
+    # plated slots made from Eagle's milled contours (plated_milling_slots): the pilot holes Eagle
+    # drew inside the contour are drilled inside the KiCad slot - same opening, not a missing hole
+    k_slots = []                                     # (ax, ay, bx, by, half width)
+    for fp in board.GetFootprints():
+        for pd in fp.Pads():
+            ds = pd.GetDrillSize()
+            if ds.x <= 0 or ds.x == ds.y or pd.GetAttribute() == pcbnew.PAD_ATTRIB_NPTH:
+                continue
+            cx_, cy_ = pd.GetPosition().x / 1e6, pd.GetPosition().y / 1e6
+            a_ = math.radians(pd.GetOrientation().AsDegrees())
+            L, Wd = max(ds.x, ds.y) / 1e6, min(ds.x, ds.y) / 1e6
+            ux, uy = (math.cos(a_), -math.sin(a_)) if ds.x >= ds.y else (math.sin(a_), math.cos(a_))
+            h_ = (L - Wd) / 2
+            k_slots.append((cx_ - ux * h_, cy_ - uy * h_, cx_ + ux * h_, cy_ + uy * h_, Wd / 2))
+    def _in_slot(x, y, d):
+        for ax, ay, bx, by, r in k_slots:
+            vx, vy = bx - ax, by - ay; L2 = vx * vx + vy * vy
+            u = 0 if L2 == 0 else max(0.0, min(1.0, ((x - ax) * vx + (y - ay) * vy) / L2))
+            if math.hypot(ax + u * vx - x, ay + u * vy - y) + d / 2 <= r + 0.02:
+                return True
+        return False
+    n_plating = n_hole_miss = n_in_slot = 0
     hole_issues = []
     for x, y, d, plated, what in e_holes:
         cx, cy = _cell(x, y)
+        if not plated and k_slots and _in_slot(x, y, d):
+            n_in_slot += 1
+            continue
         near = [h for i in (-1, 0, 1) for j in (-1, 0, 1) for h in k_holes.get((cx + i, cy + j), ())
                 if math.hypot(h[0] - x, h[1] - y) <= 0.01 and abs(h[2] - d) <= 0.01]
         if not near:
@@ -2057,7 +2081,9 @@ def verify_geometry(pcb_path, ebrd):
     for net, lay, da, ho, hn in (zo or [])[:10]:
         R.p(f'  {net} (EAGLE layer {lay}): KiCad zone {da:+g} mm2, holes {ho} vs EAGLE {hn}')
     R.p(f'**Eagle holes vs KiCad holes**: {len(e_holes)} holes ({sum(1 for h in e_holes if h[3])} plated, '
-        f'{sum(1 for h in e_holes if not h[3])} non-plated), {n_plating} with the wrong plating, {n_hole_miss} without a KiCad hole')
+        f'{sum(1 for h in e_holes if not h[3])} non-plated), {n_plating} with the wrong plating, {n_hole_miss} without a KiCad hole'
+        + (f'; {n_in_slot} Eagle pilot holes inside plated slots made from milled contours (same opening, plated)'
+           if n_in_slot else ''))
     for s_ in hole_issues:
         R.p('  ' + s_)
     GEOM_LOG.append(dict(moved=n_pos, side=n_side, rot=n_rot, val=n_val, padpos=n_padpos, padmiss=n_padmiss,
@@ -3217,7 +3243,7 @@ def plated_milling_slots(pcb_path, dry):
     without copper on both sides, stay a cut-out (reported)."""
     R.h('PCB: Eagle plated milled slots (copper on both sides around layer-46 milling) -> PTH oval drills')
     tree = read_sx(pcb_path)
-    n_fp = n_slot = n_pad = 0; kept = []
+    n_fp = n_slot = n_pad = 0; kept = []; slot_pads = set()
     for fp in kids(tree, 'footprint'):
         edge = [x for x in fp if isinstance(x, list) and x and x[0] in ('fp_line', 'fp_arc')
                 and kid(x, 'layer') is not None and str(kid(x, 'layer')[1]) == 'Edge.Cuts']
@@ -3270,7 +3296,7 @@ def plated_milling_slots(pcb_path, dry):
                        ['remove_unused_layers', 'yes'], ['keep_end_layers', 'yes'], net,
                        ['zone_connect', '2'], ['options', ['clearance', 'outline'], ['anchor', 'circle']], prim,
                        ['uuid', Q(new_uuid())]]
-                fp.append(pad); n_pad += 1
+                fp.append(pad); n_pad += 1; slot_pads.add((ref, str(num).strip('"')))
             for it in used:
                 fp.remove(it)
             for x in bcu:
@@ -3291,6 +3317,20 @@ def plated_milling_slots(pcb_path, dry):
         WARNINGS['plated_slots_kept'] = len(kept)
     if not dry and n_slot:
         write_sx(pcb_path, tree)
+        # the copper around such a slot is what the Eagle designer drew (often open on one side):
+        # no annular ring requirement for these pads - the Gerbers keep the Eagle copper
+        dru = os.path.splitext(pcb_path)[0] + '.kicad_dru'
+        old = open(dru, encoding='utf-8').read() if os.path.isfile(dru) else '(version 1)\n'
+        old = re.sub(r'\n?# eagle_exhumer plated slots begin.*?# eagle_exhumer plated slots end\n?', '\n', old, flags=re.S)
+        if not old.lstrip().startswith('(version'):
+            old = '(version 1)\n' + old
+        body = [f'(rule "eagle_plated_slot_{r}_{n}"\n  (condition "A.Type == \'Pad\' && A.memberOfFootprint(\'{r}\') '
+                f'&& A.Pad_Number == \'{n}\'")\n  (constraint annular_width (min 0mm)))' for r, n in sorted(slot_pads)]
+        with open(dru, 'w', encoding='utf-8') as f:
+            f.write(old.rstrip() + '\n# eagle_exhumer plated slots begin (copper as drawn in Eagle)\n'
+                    + '\n'.join(body) + '\n# eagle_exhumer plated slots end\n')
+        R.p(f'{len(slot_pads)} plated-slot pads: annular-width rule relaxed in `{os.path.basename(dru)}` '
+            '(the copper ring is the Eagle copper, unchanged)')
 
 
 def footprint_library(pcb_path, proj_dir, nick, sheets, dry):
