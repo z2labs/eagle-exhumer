@@ -60,6 +60,7 @@ Open the **PCB Editor from the KiCad project manager**, not as a standalone app,
   4. Click the tombstone → *Fix + check the OPEN project* → pick the Eagle file the project came from. If no saved project is loaded, the plugin asks for the `.kicad_pro` instead.
 
   The editors close, the project is fixed in place (a backup goes to `_eaglefix_backup/`), and the editors reopen. Running it again on a fixed project only re-checks it.
+- **Library clean-up (optional, all modes).** After you pick the Eagle file, the plugin asks whether to clean up the symbol library as well (batch: `--libfix`): one symbol per R / L / C part with its `MPN`, `Value` on every BOM symbol, `MPN` and `SUPPLIER1..3` / `SUPPLIER_PART_NUMBER1..3` fields from the Eagle order codes, and all symbol pins bidirectional (the PWR_FLAGs then mark where the supply comes from). It runs before the quality control. Contributed by Robert Katona; see `plugins/libfix/README.md`.
 
 Results land in the project folder:
 
