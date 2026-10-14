@@ -970,11 +970,16 @@ def add_pwr_flags(cli, root_sch, sheets, tmpdir):
             new = ['symbol', ['lib_id', Q('power:PWR_FLAG')], ['at', f'{px:g}', f'{py:g}', str(ang)], ['unit', '1'],
                    ['exclude_from_sim', 'no'], ['in_bom', 'yes'], ['on_board', 'yes'], ['dnp', 'no'],
                    ['uuid', new_uuid()]]
+            # Value text 3.81 mm out along the flag (as in the library), not on top of the pin; the
+            # Description goes in hidden: without it some KiCad 10.0.x releases show the library text
+            # "Special symbol for telling ERC where power comes from" next to every flag
+            vx, vy = inst_xform(new, 0, 3.81)
             for nm, val, hide in (('Reference', ref, True), ('Value', 'PWR_FLAG', False), ('Footprint', '', True),
-                                  ('Datasheet', '', True)):
+                                  ('Datasheet', '', True), ('Description', 'Special symbol for telling ERC where power comes from', True)):
                 e = ['effects', ['font', ['size', '1.27', '1.27']]]
                 if hide: e.append(['hide', 'yes'])
-                new.append(['property', Q(nm), Q(val), ['at', f'{px:g}', f'{py:g}', '0'], e])
+                x, y = (vx, vy) if nm == 'Value' else (px, py)
+                new.append(['property', Q(nm), Q(val), ['at', f'{x:g}', f'{y:g}', '0'], e])
             new.append(['pin', Q('1'), ['uuid', new_uuid()]])
             if paths:
                 inst_block = ['instances']
@@ -3556,34 +3561,108 @@ def sync_pcb_to_sch(cli, root_sch, pcb_path, pro_path, sheets, tmpdir, dry):
             json.dump(pro, f, indent=2)
 
 
-def fix_field_visibility(esch, sheets):
-    """Eagle shows a part attribute on the schematic only where the instance carries it with a
-    display other than "off"; KiCad's importer makes every attribute field VISIBLE (PARTNR, VENDOR,
-    OC_* ... printed over the drawing). Hide the fields Eagle did not show."""
-    R.h('SCH: field visibility as in Eagle')
+def eagle_shown_attrs(esch):
+    """Eagle part -> set of attribute names Eagle draws on the schematic: a smashed instance shows
+    its <attribute> elements unless display="off"; an unsmashed one shows the >NAME texts of its
+    symbol. Everything else (PARTNR, MPN, supplier codes ...) is data only."""
     root = eagle_root(esch)
-    if root is None:
-        return
-    shown = defaultdict(set)
-    for inst in root.iter('instance'):
-        for a in inst.findall('attribute'):
-            if (a.get('display') or 'value') != 'off':
-                shown[kref(inst.get('part'))].add(a.get('name'))
-    keep = {'Reference', 'Value', 'Footprint', 'Datasheet', 'Description', 'Intersheetrefs'}
-    n = 0
+    sch = root.find('drawing/schematic')
+    sym_texts, gate_sym = {}, {}
+    for lib in sch.findall('libraries/library'):
+        ln = lib.get('name')
+        for s in lib.findall('symbols/symbol'):
+            sym_texts[(ln, s.get('name'))] = {t.text.strip()[1:].upper() for t in s.findall('text')
+                                               if t.text and t.text.strip().startswith('>')}
+        for ds in lib.findall('devicesets/deviceset'):
+            for g in ds.findall('gates/gate'):
+                gate_sym[(ln, ds.get('name'), g.get('name'))] = (ln, g.get('symbol'))
+    parts = {p.get('name'): (p.get('library'), p.get('deviceset')) for p in sch.findall('parts/part')}
+    out = defaultdict(set)
+    for inst in sch.iter('instance'):
+        pn = inst.get('part')
+        if inst.get('smashed') == 'yes':
+            for at in inst.findall('attribute'):
+                if (at.get('display') or 'value') != 'off' and at.get('name'):
+                    out[pn].add(at.get('name').upper())
+        else:
+            lib, ds = parts.get(pn, (None, None))
+            out[pn] |= sym_texts.get(gate_sym.get((lib, ds, inst.get('gate'))), set())
+        out[pn]                                     # every placed part gets an entry
+    return out
+
+
+def _set_hidden(pp, hide=True):
+    """hide/show a field; handles both the property-level (KiCad 9/10) and the effects-level form."""
+    eff = kid(pp, 'effects')
+    hs = [x for x in pp if isinstance(x, list) and x and x[0] == 'hide']
+    hs += [x for x in (eff or []) if isinstance(x, list) and x and x[0] == 'hide']
+    if hs:
+        changed = any(str(h[1:2] and h[1]) != ('yes' if hide else 'no') for h in hs)
+        for h in hs:
+            del h[1:]; h.append('yes' if hide else 'no')
+        return changed
+    if not hide:
+        return False
+    if eff is None:
+        eff = ['effects', ['font', ['size', '1.27', '1.27']]]; pp.append(eff)
+    eff.append(['hide', 'yes'])
+    return True
+
+
+def fix_field_display(esch, sheets):
+    """KiCad's Eagle importer (some 10.0.x releases more than others) shows Eagle data attributes
+    that Eagle never drew (PARTNR, MPN ... on top of the symbols) and writes a part attribute that
+    overrides the library value twice: the library value (hidden) and the part's value (visible, often
+    empty) - older KiCad releases then show the library text. Keep one field per name with the value
+    Eagle uses, and show only what Eagle shows."""
+    R.h('SCH: symbol fields - one per name, visible only where Eagle shows them')
+    root = eagle_root(esch)
+    sch = root.find('drawing/schematic')
+    tech = {}
+    for lib in sch.findall('libraries/library'):
+        for ds in lib.findall('devicesets/deviceset'):
+            for dev in ds.findall('devices/device'):
+                for t in dev.findall('technologies/technology'):
+                    tech[(lib.get('name'), ds.get('name'), dev.get('name', ''), t.get('name', ''))] = \
+                        {(a.get('name') or '').upper(): a.get('value') or '' for a in t.findall('attribute')}
+    eff_val = {}
+    for p in sch.findall('parts/part'):
+        a = dict(tech.get((p.get('library'), p.get('deviceset'), p.get('device', ''), p.get('technology', '')), {}))
+        for at in p.findall('attribute'):
+            a[(at.get('name') or '').upper()] = at.get('value') or ''
+        eff_val[kref(p.get('name'))] = a
+    shown = {kref(k): v for k, v in eagle_shown_attrs(esch).items()}
+    keep_vis = {'REFERENCE', 'VALUE', 'INTERSHEETREFS'}
+    n_dup = n_hid = 0; hid_names = Counter()
     for sh in sheets:
         for inst in sh.instances():
-            refs = set(_inst_refs(inst))
-            vis = set().union(*(shown.get(r, set()) for r in refs)) if refs else set()
+            refs = _inst_refs(inst)
+            r = next((x for x in refs if x in eff_val), None)
+            if r is None:
+                continue
+            props = [pp for pp in kids(inst, 'property') if len(pp) > 2]
+            byname = defaultdict(list)
+            for pp in props:
+                byname[str(pp[1])].append(pp)
+            for nm, lst in byname.items():
+                if len(lst) < 2:
+                    continue
+                want = eff_val[r].get(nm.upper())
+                keep = next((pp for pp in lst if want is not None and str(pp[2]) == want), None) \
+                    or next((pp for pp in lst if str(pp[2]).strip()), lst[0])
+                for pp in lst:
+                    if pp is not keep:
+                        inst.remove(pp); n_dup += 1
+                sh.dirty = True
+            vis = shown.get(r, set())
             for pp in kids(inst, 'property'):
                 nm = str(pp[1])
-                if nm in keep or nm.startswith('ki_') or nm in vis or kid(pp, 'hide') is not None:
+                if len(pp) < 3 or nm.upper() in keep_vis or nm in ('Footprint', 'Datasheet', 'Description'):
                     continue
-                eff = kid(pp, 'effects')
-                if eff is not None and kid(eff, 'hide') is not None:
-                    continue
-                pp.append(['hide', 'yes']); sh.dirty = True; n += 1
-    R.p(f'{n} attribute fields hidden (not displayed in Eagle; KiCad import made them visible)')
+                if nm.upper() not in vis and _set_hidden(pp, True):
+                    sh.dirty = True; n_hid += 1; hid_names[nm] += 1
+    R.p(f'{n_dup} duplicate fields removed, {n_hid} fields hidden that Eagle does not show' +
+        (': ' + ', '.join(f'{k} x{v}' for k, v in hid_names.most_common(8)) if hid_names else ''))
 
 
 def fix_attr_fields(esch, sheets, dry):
@@ -4250,8 +4329,8 @@ def main():
     progress(9, 'Fixing the schematic')
     fix_power_values(sheets, esch)
     if esch:
+        fix_field_display(esch, sheets)
         fix_attr_fields(esch, sheets, a.dry_run)
-        fix_field_visibility(esch, sheets)
     if not a.no_label_globalize:
         fix_local_labels(sheets)
     fix_labels_on_bus(sheets)

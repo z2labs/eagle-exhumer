@@ -142,6 +142,8 @@ Click **Report a problem...** in the Eagle Exhumer window. It packs a diagnostic
 
 ## Services
 
+<p align="center"><img src="docs/social-preview.png" width="70%" alt="Eagle Exhumer progress output: board and schematic import, repairs and quality control"></p>
+
 Z2Labs takes on PCB conversion (EAGLE and other tools to KiCad), RF hardware design and RF troubleshooting. Write to **hello [at] z2labs [dot] io**.
 
 ## License
