@@ -479,8 +479,15 @@ def main():
                      f"{'/'.join((res['pads'] or ['-'] * 5)[1:])} | {'/'.join((res['geom'] or ['-'] * 7)[1:5])} | "
                      f"{g(res, 'geom', 5)} / {g(res, 'geom', 6)} | {g(res, 'erc', 0)} | {g(res, 'drc', 0)} | "
                      f"{'/'.join(res['selftest'] or ['-'])} | {' / '.join(res.get('time') or ['-'])} |")
-    with open('batch_summary.md', 'w', encoding='utf-8') as f:
-        f.write('\n'.join(lines) + '\n')
+    first = os.path.abspath(a.paths[0])
+    for out in ('batch_summary.md', os.path.join(first if os.path.isdir(first) else os.path.dirname(first),
+                                                 'batch_summary.md')):
+        try:                                        # the working folder may be read-only (System32 for a task)
+            with open(out, 'w', encoding='utf-8') as f:
+                f.write('\n'.join(lines) + '\n')
+            break
+        except OSError:
+            continue
     log('\n'.join(lines))
 
 
