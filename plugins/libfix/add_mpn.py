@@ -43,8 +43,8 @@ import sys
 from collections import Counter, defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from kicad_sexp import apply_edits                                    # noqa: E402
-from kraken_symbols import (LIB_NAME, MPN_FIELD, ORDER_CODE_FIELDS,   # noqa: E402
+from libfix_sexp import apply_edits                                    # noqa: E402
+from libfix_model import (LIB_NAME, MPN_FIELD, ORDER_CODE_FIELDS,   # noqa: E402
                             PARTNR_FIELD, SUPPLIER_FIELD, SymbolLib,
                             SUPPLIER_PART_NUMBER_FIELD, backup_files,
                             is_rc_reference, iter_instances, set_field_in_symbol,

@@ -784,6 +784,64 @@ def fix_nc_pins(proj_dir, sheets, eagle_truth, dry):
     R.p(f'{n} pins in {len(change)} symbols: ' + ', '.join(f'{k.split(":")[-1]} ({len(v)})' for k, v in sorted(change.items())))
 
 
+PIN_KEEP = {'passive', 'no_connect', 'free', 'bidirectional'}
+
+
+def fix_pin_types_bidirectional(proj_dir, sheets, dry):
+    """--libfix: every pin of a regular symbol becomes bidirectional (Eagle libraries carry many
+    wrong input/output/power types - ground pins as outputs, regulator outputs as power inputs -
+    and the schematic, not the library, decides where power is supplied: PWR_FLAGs). Power
+    symbols, passive / not-connected pins and HIDDEN power pins (they connect by name) stay."""
+    R.h('SCH: library clean-up - symbol pins -> bidirectional')
+    def conv(libsym):
+        if is_power(libsym):
+            return 0
+        n = 0
+        for pin in _sym_pins(libsym):
+            if len(pin) < 2 or str(pin[1]) in PIN_KEEP:
+                continue
+            if str(pin[1]).startswith('power') and any(isinstance(x, list) and x and x[0] == 'hide'
+                                                       and (len(x) < 2 or str(x[1]) != 'no') for x in pin):
+                continue
+            pin[1] = 'bidirectional'; n += 1
+        return n
+    n_sch = 0
+    for sh in sheets:
+        for ls in sh.libsyms.values():
+            k = conv(ls)
+            if k:
+                n_sch += k; sh.dirty = True
+    n_lib = 0
+    for path in sorted(glob.glob(os.path.join(proj_dir, '*.kicad_sym'))):
+        tree = read_sx(path); k = sum(conv(s) for s in kids(tree, 'symbol'))
+        if k and not dry:
+            write_sx(path, tree)
+        n_lib += k
+    R.p(f'{n_sch} pins in the schematic symbol cache and {n_lib} in the project libraries set to bidirectional '
+        '(power symbols, passive / not-connected and hidden power pins unchanged)')
+
+
+def run_libfix(proj_dir):
+    """--libfix: library clean-up by Robert Katona (plugins/libfix): unique R/L/C symbols, Value,
+    MPN and supplier fields. Runs before the quality control, so the QC checks the result."""
+    R.h('SCH: library clean-up - unique R/L/C symbols, Value / MPN / supplier fields')
+    import io, contextlib
+    try:
+        import libfix_post
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = libfix_post.post_process(proj_dir, no_verify=True)
+        for line in buf.getvalue().splitlines():
+            if line.strip() and not line.startswith('#'):
+                R.p(line.rstrip())
+        if rc:
+            WARNINGS['libfix_failed'] = rc
+            R.p(f'**WARNING: library clean-up returned {rc}** - see _eaglefix_backup/libfix/*.log')
+    except Exception as ex:
+        WARNINGS['libfix_failed'] = 1
+        R.p(f'**WARNING: library clean-up failed: {type(ex).__name__}: {ex}**')
+
+
 def fix_pinless(sheets):
     R.h('SCH: pin-less symbols (frames/logos) excluded from board/BOM')
     n = 0
@@ -4143,6 +4201,9 @@ def main():
     ap.add_argument('--kicad-cli')
     ap.add_argument('--no-pwr-flags', action='store_true')
     ap.add_argument('--no-label-globalize', action='store_true')
+    ap.add_argument('--libfix', action='store_true',
+                    help='library clean-up before the QC: unique R/L/C symbols, Value/MPN/supplier fields, '
+                         'bidirectional pins (plugins/libfix)')
     ap.add_argument('--verify-only', action='store_true', help='only compare netlists / ERC / DRC')
     ap.add_argument('--dry-run', action='store_true')
     ap.add_argument('--no-render', action='store_true', help='skip the 3D renders')
@@ -4336,6 +4397,8 @@ def main():
     fix_labels_on_bus(sheets)
     fix_pinless(sheets)
     fix_nc_pins(d, sheets, eagle_sch_truth(esch) if esch else None, a.dry_run)
+    if a.libfix:
+        fix_pin_types_bidirectional(d, sheets, a.dry_run)
     if not a.dry_run:
         for s in sheets: s.save()
     ensure_symbol_lib(d, proj, sheets, a.dry_run)
@@ -4386,6 +4449,9 @@ def main():
         progress(33, 'No-connect flags')
         add_no_connects(cli, root_sch, sheets, tmpdir, eagle_sch_truth(esch) if esch else None)
         for s in sheets: s.save()
+        if a.libfix:
+            progress(34, 'Library clean-up')
+            run_libfix(d)
         if has_pcb:
             sheets = [Sheet(p) for p in sorted(glob.glob(os.path.join(d, '*.kicad_sch')))]
             progress(36, 'Net names and fields schematic -> PCB')

@@ -326,6 +326,9 @@ def convert(src, target, timeout, brd=None, method='cli'):
     return meta
 
 
+LIBFIX = False                                      # --libfix: library clean-up (plugins/libfix)
+
+
 def run_fix(target, sch, brd, meta=None, origin=None):
     src_dir = os.path.join(target, 'eagle_source')
     os.makedirs(src_dir, exist_ok=True)
@@ -343,6 +346,8 @@ def run_fix(target, sch, brd, meta=None, origin=None):
     if mfg:
         args += ['--mfg', mfg]
         print(f'    manufacturing files: {mfg}')
+    if LIBFIX:
+        args += ['--libfix']
     r = subprocess.run([sys.executable, '-u', os.path.join(HERE, 'eagle2kicad_fix.py'), target] + args,
                        capture_output=True, text=True, encoding='utf-8', errors='replace')
     with open(os.path.join(target, 'eaglefix_console.log'), 'w', encoding='utf-8') as f:
@@ -395,9 +400,13 @@ def main():
     ap.add_argument('--out-suffix', default='_kicad')
     ap.add_argument('--force', action='store_true', help='re-convert even if the output folder exists')
     ap.add_argument('--timeout', type=int, default=600)
+    ap.add_argument('--libfix', action='store_true',
+                    help='library clean-up before the QC: unique R/L/C symbols, Value/MPN/supplier fields, bidirectional pins')
     ap.add_argument('--method', choices=['cli', 'gui'], default='cli',
                     help='cli: board via kicad-cli + schematic via GUI (default); gui: full GUI import')
     a = ap.parse_args()
+    global LIBFIX
+    LIBFIX = a.libfix
     rows = []
     for base, fs in sorted(find_designs(a.paths).items()):
         sch, brd = fs.get('sch'), fs.get('brd')
@@ -436,16 +445,6 @@ def main():
                 meta['binary_source'] = eagle_bin_summary(binfo)
             t_f = time.time()
             rc, out = run_fix(target, sch, brd, meta, origin)
-            # Post-processing: run symbol library scripts after fix
-            try:
-                from post_process import post_process as run_post_process
-                log(f'    post-processing...')
-                pp_rc = run_post_process(target, no_verify=False)
-                log(f'    post-processing exit code: {pp_rc}')
-                if pp_rc != 0:
-                    log(f'    WARNING: post-processing returned non-zero exit code {pp_rc}')
-            except Exception as ex:
-                log(f'    WARNING: post-processing failed: {type(ex).__name__}: {ex}')
             log(f'    fix {time.time() - t_f:.0f} s, convert {meta["convert_total_s"]} s ({meta["method"]})')
             res = summarize(out)
             log(f'    fix exit {rc}, {time.time() - t0:.0f} s total')

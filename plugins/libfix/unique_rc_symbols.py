@@ -33,8 +33,8 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from kicad_sexp import dedent_block                                    # noqa: E402
-from kraken_symbols import (LIB_NAME, MPN_FIELD, PARTNR_FIELD, SymbolLib,   # noqa: E402
+from libfix_sexp import dedent_block                                    # noqa: E402
+from libfix_model import (LIB_NAME, MPN_FIELD, PARTNR_FIELD, SymbolLib,   # noqa: E402
                             backup_files, build_rc_plan, iter_instances,
                             rename_symbol_block, set_field_in_symbol,
                             sheet_files, write_report)

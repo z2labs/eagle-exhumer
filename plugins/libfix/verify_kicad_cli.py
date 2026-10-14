@@ -29,7 +29,7 @@ import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from kraken_symbols import LIB_PATH, PROJECT_DIR, sheet_files, write_report
+from libfix_model import LIB_PATH, PROJECT_DIR, sheet_files, write_report
 
 KICAD_CLI = os.environ.get('KICAD_CLI', r'C:\Program Files\KiCad\10.0\bin\kicad-cli.exe')
 

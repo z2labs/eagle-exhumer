@@ -1,4 +1,4 @@
-"""Shared model of the KrakenSDR_3v3 KiCad project for the symbol tools.
+"""Shared model of a converted KiCad project for the library clean-up tools.
 
 Everything the three task scripts need:
 
@@ -10,7 +10,7 @@ Everything the three task scripts need:
 
 The tools never re-serialise a whole file: they parse it to *understand* it and
 then patch the original text through the character spans recorded by
-:func:`kicad_sexp.parse_sexp`, so the on-disk formatting stays byte-for-byte
+:func:`libfix_sexp.parse_sexp`, so the on-disk formatting stays byte-for-byte
 KiCad-like.
 """
 
@@ -22,7 +22,7 @@ import re
 import shutil
 from typing import Dict, List, Optional, Tuple
 
-from kicad_sexp import (Spans, apply_edits, dedent_block, find, find_all,
+from libfix_sexp import (Spans, apply_edits, dedent_block, find, find_all,
                         footprint_leaf, parse_sexp, sanitize_symbol_name,
                         split_lib_id, text_of, unquote)
 
@@ -30,11 +30,31 @@ from kicad_sexp import (Spans, apply_edits, dedent_block, find, find_all,
 # project layout
 # --------------------------------------------------------------------------- #
 TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_DIR = os.path.dirname(TOOLS_DIR)
-PROJECT_DIR = os.path.join(REPO_DIR, 'CAD', 'KrakenSDR_3v4')
-LIB_NAME = 'KrakenSDR_3v3-eagle-import'
+# The project to work on: EXHUMER_PROJECT (set by Eagle Exhumer) or the current folder.
+PROJECT_DIR = os.path.abspath(os.environ.get('EXHUMER_PROJECT') or os.getcwd())
+
+
+def _project_stem(project_dir: str) -> str:
+    pros = sorted(f for f in os.listdir(project_dir) if f.endswith('.kicad_pro')
+                  and not f.startswith('_'))
+    return os.path.splitext(pros[0])[0] if pros else os.path.basename(project_dir.rstrip(os.sep))
+
+
+def _project_lib(project_dir: str) -> str:
+    """The project symbol library: <project>-eagle-import as KiCad's EAGLE importer names it,
+    else the only *.kicad_sym of the project."""
+    stem = _project_stem(project_dir)
+    if os.path.isfile(os.path.join(project_dir, stem + '-eagle-import.kicad_sym')):
+        return stem + '-eagle-import'
+    syms = sorted(f for f in os.listdir(project_dir) if f.endswith('.kicad_sym'))
+    return os.path.splitext(syms[0])[0] if len(syms) == 1 else stem + '-eagle-import'
+
+
+PROJECT_STEM = _project_stem(PROJECT_DIR)
+LIB_NAME = os.environ.get('EXHUMER_PROJECT_LIB') or _project_lib(PROJECT_DIR)
 LIB_PATH = os.path.join(PROJECT_DIR, LIB_NAME + '.kicad_sym')
-BACKUP_ROOT = os.path.join(TOOLS_DIR, '_backup')
+LOG_DIR = os.path.join(PROJECT_DIR, '_eaglefix_backup', 'libfix')
+BACKUP_ROOT = LOG_DIR
 
 # R / C / L references: a single R, C or L followed by digits (KiCad style).
 # Deliberately strict so that RFL* (BAV99 diodes), CKO* (test points),
@@ -92,8 +112,7 @@ class SexpFile:
 def sheet_files(project_dir: str = PROJECT_DIR) -> List[str]:
     """All ``*.kicad_sch`` of the project, root sheet first, then sorted."""
     names = sorted(f for f in os.listdir(project_dir) if f.endswith('.kicad_sch'))
-    stem = os.path.splitext(os.path.basename(LIB_PATH))[0].split('-')[0]
-    root = stem + '.kicad_sch'
+    root = PROJECT_STEM + '.kicad_sch'
     if root in names:
         names.remove(root)
         names.insert(0, root)
@@ -185,7 +204,7 @@ class Instance:
 # unique symbol naming
 # --------------------------------------------------------------------------- #
 def base_symbol_name(base: str, value: str, footprint: str) -> str:
-    """``dzo2_RES-SMD-NEW`` + ``200k`` + ``KrakenSDR_3v3:0402`` -> ``..._200k_0402``."""
+    """``dzo2_RES-SMD-NEW`` + ``200k`` + ``Project:0402`` -> ``..._200k_0402``."""
     return sanitize_symbol_name('%s_%s_%s' % (base, value, footprint_leaf(footprint)))
 
 
@@ -374,7 +393,9 @@ def set_field_in_symbol(symbol_text: str, field: str, value: str,
                 old = symbol_text[start:end]
                 renamed = re.sub(r'"' + re.escape(rename_from) + r'"',
                                  quote_string(field), old, count=1)
-                return symbol_text[:start] + renamed + symbol_text[end:]
+                # the library's own PARTNR is the deviceset default, not this part's number:
+                # keep the field's placement, but give it the requested value
+                return set_field_in_symbol(symbol_text[:start] + renamed + symbol_text[end:], field, value)
 
     # 2. refresh an existing field
     for prop in props:
@@ -447,7 +468,8 @@ def backup_files(paths: List[str], tag: str) -> str:
 
 def write_report(tag: str, lines: List[str]) -> str:
     """Write ``tools/<tag>.log`` with *lines* and return the path."""
-    path = os.path.join(TOOLS_DIR, tag + '.log')
+    os.makedirs(LOG_DIR, exist_ok=True)
+    path = os.path.join(LOG_DIR, tag + '.log')
     with open(path, 'w', encoding='utf-8') as fh:
         fh.write('\n'.join(lines) + '\n')
     return path

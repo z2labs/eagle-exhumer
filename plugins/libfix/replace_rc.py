@@ -26,8 +26,8 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from kicad_sexp import apply_edits, find, indent_block, parse_sexp      # noqa: E402
-from kraken_symbols import (LIB_NAME, SymbolLib, backup_files,          # noqa: E402
+from libfix_sexp import apply_edits, find, indent_block, parse_sexp      # noqa: E402
+from libfix_model import (LIB_NAME, SymbolLib, backup_files,          # noqa: E402
                             build_rc_plan, is_rc_reference,
                             iter_instances, quote_string, sheet_files,
                             write_report)

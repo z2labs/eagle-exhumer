@@ -31,6 +31,20 @@ _ACTIVE = []          # keep running jobs referenced after the PCB frame closes
 
 # ------------------------------------------------------------------ helpers
 
+def _ask_libfix():
+    """Optional library clean-up (plugins/libfix, contributed by Robert Katona)."""
+    dlg = wx.MessageDialog(None, 'Also clean up the symbol library?\n\n'
+                           '- every R / L / C part gets its own symbol (value + footprint + part number)\n'
+                           '- Value, MPN and SUPPLIER1..3 / SUPPLIER_PART_NUMBER1..3 fields from the Eagle attributes\n'
+                           '- all symbol pins set to bidirectional (power symbols, passive and not-connected pins '
+                           'stay); PWR_FLAGs then go where the supply comes from\n\n'
+                           'The quality control checks the result against the Eagle source either way.',
+                           'Eagle Exhumer - library clean-up', wx.YES_NO | wx.NO_DEFAULT | wx.ICON_QUESTION)
+    dlg.SetYesNoLabels('Clean up the library', 'Keep it as imported')
+    ans = dlg.ShowModal(); dlg.Destroy()
+    return ans == wx.ID_YES
+
+
 def _python():
     cands = [os.path.join(os.path.dirname(sys.executable), 'python.exe')]
     cands += sorted(glob.glob(r'C:\Program Files\KiCad\*\bin\python.exe'), reverse=True)
@@ -584,6 +598,8 @@ class ImportJob:
         cmd += ['--layers', 'ask']                 # decisions the fixer cannot take alone come back as @@ASK
         if getattr(self, 'mfg', None):
             cmd += ['--mfg', self.mfg]
+        if getattr(self, 'libfix', False):
+            cmd += ['--libfix']                    # library clean-up before the quality control
         flags = 0x08000000 if os.name == 'nt' else 0
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                      encoding='utf-8', errors='replace', creationflags=flags, cwd=self.target)
@@ -699,16 +715,6 @@ class ImportJob:
     def _finish(self, rc):
         self._stop_driver()
         wx.CallLater(500, self._save_log)
-        # Post-processing: run symbol library scripts after fix
-        try:
-            from post_process import post_process as run_post_process
-            self.log('\n2b) post-processing...')
-            pp_rc = run_post_process(self.target, no_verify=False)
-            self.log(f'    post-processing exit code: {pp_rc}')
-            if pp_rc != 0:
-                self.log(f'    WARNING: post-processing returned non-zero exit code {pp_rc}')
-        except Exception as ex:
-            self.log(f'    WARNING: post-processing failed: {type(ex).__name__}: {ex}')
         warn = self._warnings()
         rep = os.path.join(self.target, 'eaglefix_report.md')
         other = getattr(self, 'other_project', False)
@@ -887,6 +893,7 @@ class Eagle2KiCadImport(pcbnew.ActionPlugin):
             job.bin_info = bin_info
             job.other_project = other_project
             job.mfg = _ask_mfg(orig_src)
+            job.libfix = _ask_libfix()
             wx.CallAfter(job.start)
             return
         dlg = wx.FileDialog(None, 'Eagle schematic / board (.sch, .brd)',
@@ -926,6 +933,7 @@ class Eagle2KiCadImport(pcbnew.ActionPlugin):
         os.makedirs(target, exist_ok=True)
         job = ImportJob(mgr, mid, src, target)
         job.mfg = _ask_mfg(orig_src)   # next to the original files (a binary source is converted elsewhere)
+        job.libfix = _ask_libfix()
         job.bin_info = bin_info
         wx.CallAfter(job.start)        # leave the PCB frame's event handler first: KiCad closes it
 

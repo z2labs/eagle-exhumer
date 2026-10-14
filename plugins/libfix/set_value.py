@@ -29,8 +29,8 @@ import sys
 from collections import Counter, defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from kicad_sexp import apply_edits                                    # noqa: E402
-from kraken_symbols import (LIB_NAME, VALUE_FIELD, SymbolLib,         # noqa: E402
+from libfix_sexp import apply_edits                                    # noqa: E402
+from libfix_model import (LIB_NAME, VALUE_FIELD, SymbolLib,         # noqa: E402
                             backup_files, iter_instances, is_rc_reference,
                             set_field_in_symbol, sheet_files, write_report)
 
