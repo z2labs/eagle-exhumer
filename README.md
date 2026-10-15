@@ -60,6 +60,7 @@ The tombstone button lives in the **PCB Editor**, and KiCad opens the PCB Editor
   4. Click the tombstone → *Fix + check the OPEN project* → pick the Eagle file the project came from. If no saved project is loaded, the plugin asks for the `.kicad_pro` instead.
 
   The editors close, the project is fixed in place (a backup goes to `_eaglefix_backup/`), and the editors reopen. Running it again on a fixed project only re-checks it.
+- **Stand-alone launcher (Windows).** Double-click `Eagle Exhumer.cmd` in the plugin folder: pick the EAGLE `.sch`/`.brd`, press EXHUME. No KiCad project needs to be open; KiCad's importer runs in its own instance in the background, the result lands in `<design>_kicad` next to the EAGLE file. Comes with plasma, copper bars, a scroller and an original synthesised three-voice C64-style tune (put your own WAVs in a `music` folder next to it to hear those instead).
 - **Library clean-up (optional, all modes).** After you pick the Eagle file, the plugin asks whether to clean up the symbol library as well (batch: `--libfix`): one symbol per R / L / C part with its `MPN`, `Value` on every BOM symbol, `MPN` and `SUPPLIER1..3` / `SUPPLIER_PART_NUMBER1..3` fields from the Eagle order codes, and all symbol pins bidirectional (the PWR_FLAGs then mark where the supply comes from). It runs before the quality control. Contributed by Robert Katona; see `plugins/libfix/README.md`.
 
 Results land in the project folder:

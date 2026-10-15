@@ -40,50 +40,107 @@ def _note(n):
 
 
 def synth_tune():
-    """An original 4-voice chiptune (square lead with arpeggios, triangle bass, noise drums), 16 bars."""
-    bpm = 132; step = 60.0 / bpm / 4                       # 16th notes
-    prog = [57, 53, 48, 55]                                # Am F C G (root notes)
-    chords = {57: (0, 3, 7), 53: (0, 4, 7), 48: (0, 4, 7), 55: (0, 4, 7)}
-    lead = [12, None, 15, 12, 19, None, 17, 15, 12, None, 10, 12, 15, None, 14, 12]
-    steps = 16 * 16
-    n = int(steps * step * SR)
-    t = np.arange(n) / SR if np is not None else None
-    out = np.zeros(n) if np is not None else None
+    """An original three-voice tune in the C64 SID manner, about a minute long, synthesised here.
+    Voice 1: pulse lead with pulse-width sweep, delayed vibrato and ADSR. Voice 2: 50 Hz chord
+    arpeggios through a slowly sweeping low-pass. Voice 3: bass and drums on one channel (the
+    classic trick: a noise burst on the first frame, then the note). Intro, A, B, A', outro."""
+    bpm = 125; step = 60.0 / bpm / 4                       # one 16th note
+    spb = int(step * SR)
+    N = None                                               # rest
+    # chords per bar: (root midi, intervals)
+    m, M = (0, 3, 7), (0, 4, 7)
+    A = [(57, m), (53, M), (48, M), (55, M)] * 2           # Am F C G
+    B = [(50, m), (55, M), (52, m), (57, m)] * 2           # Dm G Em Am
+    form = [('intro', A[:4]), ('A', A), ('B', B), ('A', A), ('outro', [(57, m), (53, M), (55, M), (57, m)])]
+    # original lead lines, 16 steps per bar, midi notes (N = rest, '-' = hold)
+    la = [[69, '-', 72, '-', 76, '-', 74, 72, 74, '-', '-', N, 72, 71, 69, '-'],
+          [65, '-', 69, '-', 72, '-', 74, '-', 72, '-', 69, '-', 67, '-', '-', N],
+          [67, '-', 72, '-', 76, '-', 79, '-', 77, 76, 74, '-', 72, '-', '-', N],
+          [71, '-', 74, '-', 79, '-', 78, 79, 81, '-', 79, '-', 74, '-', 71, '-'],
+          [76, '-', 74, 72, 69, '-', 72, '-', 76, '-', 81, '-', 79, 77, 76, '-'],
+          [77, '-', 76, 74, 72, '-', 69, '-', 72, '-', 74, '-', 72, '-', '-', N],
+          [76, '-', 79, '-', 84, '-', 83, 81, 79, '-', 76, '-', 74, '-', 72, '-'],
+          [71, '-', 74, 76, 79, '-', '-', '-', 81, '-', 79, '-', 76, '-', '-', N]]
+    lb = [[74, '-', 77, '-', 81, '-', 79, 77, 76, '-', 74, '-', 72, '-', 74, '-'],
+          [71, '-', 74, '-', 79, '-', '-', 81, 79, '-', 77, '-', 76, '-', 74, '-'],
+          [76, '-', 79, '-', 83, '-', 81, 79, 78, '-', 76, '-', 74, '-', '-', N],
+          [72, '-', 76, '-', 81, '-', '-', '-', 79, 81, 83, '-', 84, '-', '-', N],
+          [86, '-', 84, 81, 77, '-', 81, '-', 84, '-', 86, 84, 81, '-', 77, '-'],
+          [83, '-', 81, 79, 74, '-', 79, '-', 83, '-', 86, '-', 83, '-', '-', N],
+          [79, '-', 83, '-', 88, '-', 86, 84, 83, '-', 79, '-', 76, '-', 74, '-'],
+          [76, '-', 79, 81, 84, '-', '-', '-', 81, '-', '-', '-', N, N, N, N]]
+    bars = []
+    for sec, chords in form:
+        for i, ch in enumerate(chords):
+            lead = la[i] if sec == 'A' else lb[i] if sec == 'B' else [N] * 16
+            bars.append((sec, ch, lead))
+    total = len(bars) * 16 * spb
+    v1 = np.zeros(total); v2 = np.zeros(total); v3 = np.zeros(total)
     env_track = []
-    for s in range(steps):
-        bar = s // 16; pos = s % 16
-        root = prog[bar % 4]
-        a, b = int(s * step * SR), int((s + 1) * step * SR)
-        seg = np.arange(b - a) / SR
-        lvl = 0.0
-        # arpeggio (fast 50 Hz chord cycling, the C64 way)
-        ch = chords[root]
-        arp_n = root + 12 + np.array(ch)[(np.floor(seg * 50).astype(int)) % 3]
-        f = 440.0 * 2 ** ((arp_n - 69) / 12.0)
-        ph = np.cumsum(f / SR)
-        out[a:b] += 0.10 * np.sign(np.sin(2 * np.pi * ph)) * (0.6 + 0.4 * (pos % 4 == 0))
-        # lead (second half of each 4-bar phrase)
-        ln = lead[pos] if (bar % 4) in (1, 3) or bar >= 8 else None
-        if ln is not None:
-            fl = _note(root + ln + 12 if bar >= 8 else root + ln)
-            e = np.exp(-seg * 6)
-            vib = 1 + 0.004 * np.sin(2 * np.pi * 6 * seg)
-            out[a:b] += 0.16 * e * np.sign(np.sin(2 * np.pi * fl * vib * seg) - 0.3)
-            lvl += 0.6
-        # bass: root on the beat, octave on the off-beat
-        fb = _note(root - 12 + (12 if pos % 4 == 2 else 0))
-        tri = 2 * np.abs(2 * ((fb * seg) % 1) - 1) - 1
-        out[a:b] += 0.22 * tri * np.exp(-seg * 3)
-        # drums: kick on 0/8, snare on 4/12, hats on odd steps
-        if pos in (0, 8) or (bar >= 4 and pos in (0, 6, 8)):
-            out[a:b] += 0.35 * np.sin(2 * np.pi * (120 * np.exp(-seg * 30) + 40) * seg) * np.exp(-seg * 18); lvl += 1
-        if pos in (4, 12):
-            out[a:b] += 0.18 * np.random.uniform(-1, 1, b - a) * np.exp(-seg * 22); lvl += 0.8
-        if pos % 2 == 1 and bar >= 2:
-            out[a:b] += 0.05 * np.random.uniform(-1, 1, b - a) * np.exp(-seg * 60)
-        env_track.append(min(1.0, 0.3 + lvl * 0.4))
-    out = np.clip(out, -1, 1)
-    return (out * 30000).astype('<i2').tobytes(), env_track, step
+    f = lambda n: 440.0 * 2 ** ((n - 69) / 12.0)
+    # voice 1: notes with holds -> (start, length, note)
+    events = []
+    for bi, (_, _, lead) in enumerate(bars):
+        for k, n in enumerate(lead):
+            if isinstance(n, int):
+                events.append([(bi * 16 + k) * spb, spb, n])
+            elif n == '-' and events and events[-1][0] + events[-1][1] == (bi * 16 + k) * spb:
+                events[-1][1] += spb
+    for st, ln, n in events:
+        t = np.arange(ln) / SR
+        vib = 1 + 0.006 * np.sin(2 * np.pi * 5.5 * t) * np.clip((t - 0.18) * 4, 0, 1)
+        ph = np.cumsum(f(n) * vib / SR)
+        duty = 0.25 + 0.2 * np.sin(2 * np.pi * 0.7 * (st / SR + t))          # pulse-width sweep
+        wave_ = np.where((ph % 1) < duty, 1.0, -1.0)
+        adsr = np.minimum(1, t / 0.005) * (0.65 + 0.35 * np.exp(-t * 8)) * np.clip((ln / SR - t) / 0.04, 0, 1)
+        v1[st:st + ln] += 0.17 * wave_ * adsr
+    # voice 2: 50 Hz arpeggio of the bar chord, one octave up
+    for bi, (sec, (root, iv), _) in enumerate(bars):
+        a0 = bi * 16 * spb; ln = 16 * spb; t = np.arange(ln) / SR
+        notes = root + 12 + np.array(iv)[(np.floor(t * 50).astype(int)) % 3]
+        ph = np.cumsum(440.0 * 2 ** ((notes - 69) / 12.0) / SR)
+        sq = np.where((ph % 1) < 0.5, 1.0, -1.0)
+        gate = 0.55 + 0.45 * ((np.floor(t / step).astype(int) % 2) == 0)
+        v2[a0:a0 + ln] += (0.09 if sec != 'intro' else 0.12) * sq * gate
+    # one-pole low-pass on voice 2 with a slow cutoff sweep (the SID filter feel)
+    cut = 0.08 + 0.25 * (0.5 + 0.5 * np.sin(2 * np.pi * np.arange(total) / SR / 9.0))
+    y = 0.0; out2 = np.empty(total)
+    for i0 in range(0, total, 64):                     # block-wise update keeps it fast enough
+        c = cut[i0]; blk = v2[i0:i0 + 64]; ob = np.empty(len(blk))
+        for j, x in enumerate(blk):
+            y += c * (x - y); ob[j] = y
+        out2[i0:i0 + len(blk)] = ob
+    v2 = out2 * 1.8
+    # voice 3: bass + drums on one channel
+    rng = np.random.default_rng(64)
+    for bi, (sec, (root, iv), _) in enumerate(bars):
+        for k in range(16):
+            st = (bi * 16 + k) * spb; t = np.arange(spb) / SR
+            drum = None
+            if k in (0, 8) and sec != 'intro':
+                drum = 'kick'
+            elif k in (4, 12) and sec != 'intro':
+                drum = 'snare'
+            if drum == 'kick':
+                fr = 160 * np.exp(-t * 35) + 45
+                v3[st:st + spb] += 0.38 * np.sign(np.sin(2 * np.pi * np.cumsum(fr / SR))) * np.exp(-t * 14)
+            elif drum == 'snare':
+                nz = rng.uniform(-1, 1, spb)
+                v3[st:st + spb] += 0.22 * nz * np.exp(-t * 18) * (t < 0.02) + 0.15 * nz * np.exp(-t * 25)
+            else:
+                n = root - 24 + (12 if k % 4 == 2 else 0) + (7 if k % 8 == 6 else 0)
+                tri = 2 * np.abs(2 * ((f(n) * t) % 1) - 1) - 1
+                if k % 2 == 1 and sec != 'intro':          # hi-hat tick in front of off-beat notes
+                    v3[st:st + spb] += 0.06 * rng.uniform(-1, 1, spb) * (t < 0.012)
+                v3[st:st + spb] += 0.26 * tri * np.exp(-t * 5)
+    mix = v1 + v2 + v3
+    mix = np.tanh(mix * 1.15)                               # soft clip, a little "chip" grit
+    for bi in range(len(bars)):
+        for k in range(16):
+            a0 = (bi * 16 + k) * spb
+            env_track.append(float(min(1.0, np.sqrt(np.mean(mix[a0:a0 + spb] ** 2)) * 3.2)))
+    fade = np.ones(total); fl = 2 * SR; fade[-fl:] = np.linspace(1, 0, fl)
+    return (mix * fade * 29000).astype('<i2').tobytes(), env_track, step
 
 
 def write_wav(path, pcm):
