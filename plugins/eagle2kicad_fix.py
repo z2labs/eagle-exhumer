@@ -784,6 +784,98 @@ def fix_nc_pins(proj_dir, sheets, eagle_truth, dry):
     R.p(f'{n} pins in {len(change)} symbols: ' + ', '.join(f'{k.split(":")[-1]} ({len(v)})' for k, v in sorted(change.items())))
 
 
+def fix_dangling_wire_labels(sheets):
+    """Eagle names a net segment with a label placed ANYWHERE along its wire (or next to it - the
+    segment owns the label); the wire itself often ends in free space. KiCad then shows the label
+    in the middle of the wire and an 'unconnected wire endpoint' at the free end. A label lying on
+    a wire that has exactly one free end moves to that end (same net, same name), facing outwards."""
+    R.h('SCH: net labels moved to the free end of their wire')
+    LBL = ('label', 'global_label', 'hierarchical_label')
+    k2 = lambda x, y: (round(float(x), 2), round(float(y), 2))
+    n = 0
+    for sh in sheets:
+        wires = []
+        for w in kids(sh.tree, 'wire'):
+            xy = kids(kid(w, 'pts') or [], 'xy')
+            if len(xy) == 2:
+                wires.append((float(xy[0][1]), float(xy[0][2]), float(xy[1][1]), float(xy[1][2])))
+        if not wires:
+            continue
+        ends = Counter()
+        for x1, y1, x2, y2 in wires:
+            ends[k2(x1, y1)] += 1; ends[k2(x2, y2)] += 1
+        other = set()                                  # pins, junctions, no-connects, labels, bus entries
+        for inst in sh.instances():
+            ls = sh.libsyms.get(str(kid(inst, 'lib_id')[1]))
+            if ls is None:
+                continue
+            u = kid(inst, 'unit'); unit = int(u[1]) if u else 1
+            for pn in _unit_pins(ls, unit):
+                for f in (inst_xform, _inst_xform2):
+                    other.add(k2(*f(inst, pn['x'], pn['y'])))
+        for head in ('junction', 'no_connect') + LBL:
+            for j in kids(sh.tree, head):
+                at = kid(j, 'at')
+                if at: other.add(k2(at[1], at[2]))
+        for be in kids(sh.tree, 'bus_entry'):
+            at, sz = kid(be, 'at'), kid(be, 'size')
+            if at and sz:
+                other.add(k2(at[1], at[2])); other.add(k2(float(at[1]) + float(sz[1]), float(at[2]) + float(sz[2])))
+        for sht in kids(sh.tree, 'sheet'):
+            for sp in kids(sht, 'pin'):
+                at = kid(sp, 'at')
+                if at: other.add(k2(at[1], at[2]))
+        def on_any_wire_interior(x, y):
+            # a T-joint in the middle of another wire also connects
+            for a, b, c, d in wires:
+                if min(a, c) - 1e-3 <= x <= max(a, c) + 1e-3 and min(b, d) - 1e-3 <= y <= max(b, d) + 1e-3 \
+                        and abs((x - a) * (d - b) - (y - b) * (c - a)) < 1e-3 * max(1.0, abs(c - a) + abs(d - b)):
+                    if k2(x, y) not in (k2(a, b), k2(c, d)):
+                        return True
+            return False
+        free = lambda p: ends[k2(*p)] == 1 and k2(*p) not in other and not on_any_wire_interior(*p)
+        used_ends = set()
+        for node in sh.tree:
+            if not (isinstance(node, list) and node and node[0] in LBL):
+                continue
+            at = kid(node, 'at')
+            if not at or is_bus_name(str(node[1])):
+                continue
+            lx, ly = float(at[1]), float(at[2])
+            hits = [w for w in wires if min(w[0], w[2]) - 1e-3 <= lx <= max(w[0], w[2]) + 1e-3
+                    and min(w[1], w[3]) - 1e-3 <= ly <= max(w[1], w[3]) + 1e-3
+                    and abs((lx - w[0]) * (w[3] - w[1]) - (ly - w[1]) * (w[2] - w[0])) < 1e-3 * max(1.0, abs(w[2] - w[0]) + abs(w[3] - w[1]))]
+            if len(hits) != 1:
+                continue
+            x1, y1, x2, y2 = hits[0]
+            if k2(lx, ly) in (k2(x1, y1), k2(x2, y2)):
+                continue                                # already at an end
+            fe = [p for p in ((x1, y1), (x2, y2)) if free(p)]
+            if len(fe) != 1 or k2(*fe[0]) in used_ends:
+                continue
+            ex, ey = fe[0]; ox, oy = (x2, y2) if (ex, ey) == (x1, y1) else (x1, y1)
+            if abs(ex - ox) > abs(ey - oy):
+                ang = 0 if ex > ox else 180
+            else:
+                ang = 270 if ey > oy else 90           # schematic y grows downwards
+            dx, dy = ex - lx, ey - ly
+            at[1], at[2] = f'{ex:g}', f'{ey:g}'
+            if len(at) > 3: at[3] = str(ang)
+            else: at.append(str(ang))
+            eff = kid(node, 'effects')
+            if eff is not None:
+                j = kid(eff, 'justify')
+                want = 'left' if ang in (0, 90) else 'right'
+                if j is None: eff.append(['justify', want])
+                else: j[1:] = [want]
+            for pr in kids(node, 'property'):
+                pa = kid(pr, 'at')
+                if pa:
+                    pa[1] = f'{float(pa[1]) + dx:g}'; pa[2] = f'{float(pa[2]) + dy:g}'
+            used_ends.add(k2(ex, ey)); sh.dirty = True; n += 1
+    R.p(f'{n} labels moved from the middle of a wire to its free end')
+
+
 PIN_KEEP = {'passive', 'no_connect', 'free', 'bidirectional'}
 
 
@@ -3474,6 +3566,30 @@ def footprint_library(pcb_path, proj_dir, nick, sheets, dry):
                 if fpp is not None and str(fpp[2]) != want:
                     fpp[2] = Q(want); sh.dirty = True; n += 1
     R.p(f'{n} schematic Footprint fields re-linked')
+    # library symbols too (sheet caches and the project .kicad_sym): KiCad's importer leaves them on
+    # '<project>:<package>', a library that does not exist - 'Update Symbols from Library' would copy
+    # that dead link onto the placed symbols (ERC: footprint not found in library)
+    have = {os.path.splitext(f)[0] for f in os.listdir(lib_dir)} if os.path.isdir(lib_dir) else set()
+    def relink(sym):
+        k = 0
+        for pp in kids(sym, 'property'):
+            if len(pp) > 2 and str(pp[1]) == 'Footprint' and ':' in str(pp[2]):
+                lib_, name = str(pp[2]).split(':', 1)
+                if lib_ != nick and name in have:
+                    pp[2] = Q(f'{nick}:{name}'); k += 1
+        return k
+    n_ls = 0
+    for sh in sheets:
+        ls = kid(sh.tree, 'lib_symbols')
+        k = sum(relink(x) for x in kids(ls, 'symbol')) if ls is not None else 0
+        if k:
+            n_ls += k; sh.dirty = True
+    for path in sorted(glob.glob(os.path.join(proj_dir, '*.kicad_sym'))):
+        tree = read_sx(path); k = sum(relink(x) for x in kids(tree, 'symbol'))
+        if k:
+            n_ls += k
+            if not dry: write_sx(path, tree)
+    R.p(f'{n_ls} library-symbol Footprint fields re-linked to `{nick}`')
 
 # --------------------------------------------------------------------------- design rules
 
@@ -4505,6 +4621,7 @@ def main():
     if not a.no_label_globalize:
         fix_local_labels(sheets)
     fix_labels_on_bus(sheets)
+    fix_dangling_wire_labels(sheets)
     fix_pinless(sheets)
     fix_nc_pins(d, sheets, eagle_sch_truth(esch) if esch else None, a.dry_run)
     if a.libfix:
