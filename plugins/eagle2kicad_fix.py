@@ -991,9 +991,36 @@ def libfix_sync_instances(proj_dir, sheets, dry):
                     inst.remove(have[k]); n_drop += 1; changed = True
             if changed:
                 n_inst += 1; sh.dirty = True
+    # the library symbols point at the footprint their placed symbols use (one per unique part), so a
+    # later 'Update Symbols from Library' keeps a working footprint link
+    used = defaultdict(set)
+    for sh in sheets:
+        for inst in sh.instances():
+            lid = str(kid(inst, 'lib_id')[1])
+            if lid.startswith(nick + ':'):
+                used[lid.split(':', 1)[1]].add(prop_val(inst, 'Footprint', ''))
+    lib_tree = read_sx(lib_path); n_fp = 0
+    def fp_fix(sym, name):
+        fps = used.get(name) or set()
+        if len(fps) != 1 or not next(iter(fps)):
+            return 0
+        pp = prop(sym, 'Footprint')
+        if pp is not None and str(pp[2]) != next(iter(fps)):
+            pp[2] = Q(next(iter(fps))); return 1
+        return 0
+    for sym in kids(lib_tree, 'symbol'):
+        n_fp += fp_fix(sym, str(sym[1]))
+    for sh in sheets:
+        ls = kid(sh.tree, 'lib_symbols')
+        for sym in kids(ls, 'symbol') if ls is not None else []:
+            if str(sym[1]).startswith(nick + ':') and fp_fix(sym, str(sym[1]).split(':', 1)[1]):
+                sh.dirty = True
     if not dry:
+        if n_fp:
+            write_sx(lib_path, lib_tree)
         for sh in sheets:
             sh.save()
+    R.p(f'{n_fp} library symbols now point at the footprint their placed symbols use')
     R.p(f'{n_cache} cached symbol definitions replaced from `{os.path.basename(lib_path)}`; {n_inst} placed symbols '
         f'updated ({n_set} fields set, {n_drop} Eagle fields folded into MPN / SUPPLIER_PART_NUMBERn removed)')
 
@@ -3570,13 +3597,22 @@ def footprint_library(pcb_path, proj_dir, nick, sheets, dry):
     # '<project>:<package>', a library that does not exist - 'Update Symbols from Library' would copy
     # that dead link onto the placed symbols (ERC: footprint not found in library)
     have = {os.path.splitext(f)[0] for f in os.listdir(lib_dir)} if os.path.isdir(lib_dir) else set()
+    used = defaultdict(set)                           # library symbol -> footprints of its placed symbols
+    for sh in sheets:
+        for inst in sh.instances():
+            f_ = prop_val(inst, 'Footprint', '')
+            if f_.startswith(nick + ':'):
+                used[str(kid(inst, 'lib_id')[1]).split(':', 1)[-1]].add(f_)
     def relink(sym):
         k = 0
+        name_ = str(sym[1]).split(':', 1)[-1]
         for pp in kids(sym, 'property'):
             if len(pp) > 2 and str(pp[1]) == 'Footprint' and ':' in str(pp[2]):
-                lib_, name = str(pp[2]).split(':', 1)
-                if lib_ != nick and name in have:
-                    pp[2] = Q(f'{nick}:{name}'); k += 1
+                cur = str(pp[2]); lib_, name = cur.split(':', 1)
+                want = next(iter(used[name_])) if len(used.get(name_, ())) == 1 else \
+                    (f'{nick}:{name}' if name in have else None)
+                if want and want != cur:
+                    pp[2] = Q(want); k += 1
         return k
     n_ls = 0
     for sh in sheets:

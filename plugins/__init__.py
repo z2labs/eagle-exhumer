@@ -712,8 +712,46 @@ class ImportJob:
             out.append(f"{w['plated_slots_kept']} milled contours in packages stay NON-plated cut-outs - see the report")
         return ('\n\nWarning: ' + '; '.join(out) + '.') if out else ''
 
+    def _reload_project(self):
+        """KiCad keeps the project settings (net classes, design rules, ...) in memory from before the
+        fix; the next save of a reopened editor writes them back over the fixed .kicad_pro. Reload the
+        project from disk through File > Open Recent (KiCad's own path, any UI language). If KiCad
+        writes its old copy while closing, the fixed file is put back and loaded once more."""
+        pro = self.pro
+        if not self.mgr or not os.path.isfile(pro) or getattr(self, 'other_project', False):
+            return
+        want = os.path.normcase(os.path.abspath(pro))
+        def is_pro(label):
+            t = label.split('\t')[0].replace('&&', '\x00').replace('&', '').replace('\x00', '&').strip()
+            t = re.sub(r'^\d+\s+', '', t)
+            return os.path.normcase(os.path.abspath(t)) == want if t else False
+        mid = _find_item(self.mgr, is_pro)
+        if mid is None:
+            self.log('\nNOTE: reopen the project (File > Open Recent) before saving in KiCad - '
+                     'it still holds the project settings from before the fix.')
+            self.reload_note = True
+            return
+        fixed = open(pro, 'rb').read()
+        _menu(self.mgr, mid)
+        def check(again=True):
+            try:
+                if open(pro, 'rb').read() != fixed:
+                    with open(pro, 'wb') as f:
+                        f.write(fixed)
+                    if again:
+                        _menu(self.mgr, mid); wx.CallLater(2500, check, False); return
+                self.log('project reloaded from disk (fixed design rules and net classes are active)')
+            except Exception as ex:
+                self.log(f'project reload check failed: {ex}')
+        wx.CallLater(2500, check)
+
     def _finish(self, rc):
         self._stop_driver()
+        if rc in (0, 1):
+            try:
+                self._reload_project()
+            except Exception as ex:
+                self.log(f'project reload failed: {ex}')
         wx.CallLater(500, self._save_log)
         warn = self._warnings()
         rep = os.path.join(self.target, 'eaglefix_report.md')
