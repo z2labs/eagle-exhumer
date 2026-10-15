@@ -958,8 +958,18 @@ def libfix_sync_instances(proj_dir, sheets, dry):
                 if isinstance(s, list) and s and s[0] == 'symbol':
                     name = str(s[1])
                     if name.startswith(nick + ':') and name.split(':', 1)[1] in lib:
-                        new = _requote(lib[name.split(':', 1)[1]]); new[1] = Q(name)
-                        ls[i] = new; sh.libsyms[name] = new; n_cache += 1; sh.dirty = True
+                        # fields only: the cached graphics / pins stay as KiCad's importer wrote them
+                        # (the library copy can differ per gate / device variant)
+                        lsrc = lib[name.split(':', 1)[1]]
+                        cp = {str(p[1]): p for p in kids(s, 'property') if len(p) > 2}
+                        for p_ in kids(lsrc, 'property'):
+                            if len(p_) > 2 and str(p_[1]) not in ('Reference', 'Value'):
+                                if str(p_[1]) in cp:
+                                    cp[str(p_[1])][2] = Q(str(p_[2]))
+                                else:
+                                    last = max(j for j, x in enumerate(s) if isinstance(x, list) and x and x[0] == 'property')
+                                    s.insert(last + 1, _requote(p_))
+                        n_cache += 1; sh.dirty = True
         for inst in sh.instances():
             lid = str(kid(inst, 'lib_id')[1])
             if not lid.startswith(nick + ':') or lid.split(':', 1)[1] not in lib:
@@ -968,6 +978,18 @@ def libfix_sync_instances(proj_dir, sheets, dry):
             lprops = [(str(p[1]), str(p[2])) for p in kids(lsym, 'property') if len(p) > 2]
             lval = dict(lprops)
             have = {str(p[1]): p for p in kids(inst, 'property') if len(p) > 2}
+            # the part's own numbers win over the library's (one library symbol can carry parts
+            # with different PARTNR / order codes): MPN = this part's PARTNR, suppliers = its OC_*
+            own = lambda k: str(have[k][2]).strip() if k in have else ''
+            if own('PARTNR') and 'MPN' in lval:
+                lval['MPN'] = own('PARTNR')
+            occ = [(nm, own(k)) for k, nm in (('OC_DIGIKEY', 'Digi-Key'), ('OC_FARNELL', 'Farnell'), ('OC_NEWARK', 'Newark'))
+                   if own(k) and own(k).lower() not in ('-', '--', 'n/a', 'na', 'none', 'tbd')]
+            if occ and any(k.startswith('SUPPLIER_PART_NUMBER') for k in lval):
+                for i in range(1, 4):
+                    sup, num = occ[i - 1] if i <= len(occ) else ('', '')
+                    lval[f'SUPPLIER{i}'] = sup; lval[f'SUPPLIER_PART_NUMBER{i}'] = num
+            lprops = [(k, lval.get(k, v)) for k, v in lprops]
             def folded(k, v):                     # PARTNR / OC_* whose value lives on in MPN / SUPPLIER_*
                 v = v.strip()
                 if not v or k not in LIBFIX_FOLDED:
@@ -980,7 +1002,9 @@ def libfix_sync_instances(proj_dir, sheets, dry):
                 if k in LIBFIX_KEEP or k.startswith('ki_') or folded(k, str(have[k][2]) if k in have else v):
                     continue
                 if k in have:
-                    if str(have[k][2]) != v and (v or k.startswith(('MPN', 'SUPPLIER'))):
+                    # an existing field is the part's own (Eagle part attribute may override the
+                    # library default on purpose); only the clean-up's own fields are refreshed
+                    if k.startswith(('MPN', 'SUPPLIER')) and str(have[k][2]) != v:
                         have[k][2] = Q(v); n_set += 1; changed = True
                 else:
                     inst.append(['property', Q(k), Q(v), ['at', str(at[1]), str(at[2]), '0'], ['hide', 'yes'],
@@ -1021,7 +1045,7 @@ def libfix_sync_instances(proj_dir, sheets, dry):
         for sh in sheets:
             sh.save()
     R.p(f'{n_fp} library symbols now point at the footprint their placed symbols use')
-    R.p(f'{n_cache} cached symbol definitions replaced from `{os.path.basename(lib_path)}`; {n_inst} placed symbols '
+    R.p(f'{n_cache} cached symbol definitions updated (fields) from `{os.path.basename(lib_path)}`; {n_inst} placed symbols '
         f'updated ({n_set} fields set, {n_drop} Eagle fields folded into MPN / SUPPLIER_PART_NUMBERn removed)')
 
 
