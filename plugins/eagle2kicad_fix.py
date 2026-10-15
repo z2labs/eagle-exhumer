@@ -842,6 +842,70 @@ def run_libfix(proj_dir):
         R.p(f'**WARNING: library clean-up failed: {type(ex).__name__}: {ex}**')
 
 
+LIBFIX_FOLDED = ('PARTNR', 'OC_DIGIKEY', 'OC_FARNELL', 'OC_NEWARK')   # -> MPN / SUPPLIER_PART_NUMBERn
+LIBFIX_KEEP = ('Reference', 'Value', 'Footprint', 'Datasheet', 'Intersheetrefs')
+
+
+def libfix_sync_instances(proj_dir, sheets, dry):
+    """--libfix: what KiCad's 'Update Symbols from Library' does for the fields. The clean-up writes
+    MPN / SUPPLIERn / Description into the PROJECT LIBRARY; the placed symbols and each sheet's
+    symbol cache keep the old copy until the update. Here: the cache gets the library definition,
+    every instance gets the library fields (hidden, Reference/Value/Footprint/Datasheet kept), and
+    the Eagle fields folded into them (PARTNR, OC_*) are dropped. Other Eagle fields stay."""
+    R.h('SCH: library clean-up - placed symbols updated from the project library (fields)')
+    lib_path = next((p for p in sorted(glob.glob(os.path.join(proj_dir, '*-eagle-import.kicad_sym')))), None)
+    if lib_path is None:
+        R.p('no <project>-eagle-import.kicad_sym - skipped'); return
+    nick = os.path.basename(lib_path)[:-len('.kicad_sym')]
+    lib = {str(s[1]): s for s in kids(read_sx(lib_path), 'symbol')}
+    n_cache = n_inst = n_set = n_drop = 0
+    for sh in sheets:
+        ls = kid(sh.tree, 'lib_symbols')
+        if ls is not None:
+            for i, s in enumerate(ls):
+                if isinstance(s, list) and s and s[0] == 'symbol':
+                    name = str(s[1])
+                    if name.startswith(nick + ':') and name.split(':', 1)[1] in lib:
+                        new = _requote(lib[name.split(':', 1)[1]]); new[1] = Q(name)
+                        ls[i] = new; sh.libsyms[name] = new; n_cache += 1; sh.dirty = True
+        for inst in sh.instances():
+            lid = str(kid(inst, 'lib_id')[1])
+            if not lid.startswith(nick + ':') or lid.split(':', 1)[1] not in lib:
+                continue
+            lsym = lib[lid.split(':', 1)[1]]
+            lprops = [(str(p[1]), str(p[2])) for p in kids(lsym, 'property') if len(p) > 2]
+            lval = dict(lprops)
+            have = {str(p[1]): p for p in kids(inst, 'property') if len(p) > 2}
+            def folded(k, v):                     # PARTNR / OC_* whose value lives on in MPN / SUPPLIER_*
+                v = v.strip()
+                if not v or k not in LIBFIX_FOLDED:
+                    return False
+                if k == 'PARTNR':
+                    return lval.get('MPN', '').strip() == v
+                return any(lval.get(f'SUPPLIER_PART_NUMBER{i}', '').strip() == v for i in range(1, 4))
+            at = kid(inst, 'at'); changed = False
+            for k, v in lprops:
+                if k in LIBFIX_KEEP or k.startswith('ki_') or folded(k, str(have[k][2]) if k in have else v):
+                    continue
+                if k in have:
+                    if str(have[k][2]) != v and (v or k.startswith(('MPN', 'SUPPLIER'))):
+                        have[k][2] = Q(v); n_set += 1; changed = True
+                else:
+                    inst.append(['property', Q(k), Q(v), ['at', str(at[1]), str(at[2]), '0'], ['hide', 'yes'],
+                                 ['effects', ['font', ['size', '1.27', '1.27']]]])
+                    n_set += 1; changed = True
+            for k in LIBFIX_FOLDED:
+                if k in have and folded(k, str(have[k][2])):
+                    inst.remove(have[k]); n_drop += 1; changed = True
+            if changed:
+                n_inst += 1; sh.dirty = True
+    if not dry:
+        for sh in sheets:
+            sh.save()
+    R.p(f'{n_cache} cached symbol definitions replaced from `{os.path.basename(lib_path)}`; {n_inst} placed symbols '
+        f'updated ({n_set} fields set, {n_drop} Eagle fields folded into MPN / SUPPLIER_PART_NUMBERn removed)')
+
+
 def fix_pinless(sheets):
     R.h('SCH: pin-less symbols (frames/logos) excluded from board/BOM')
     n = 0
@@ -3810,6 +3874,12 @@ def verify_sch_attrs(esch, sheets):
             kv = kf[r].get(k)
             if kv is None and k.upper() == 'DESCRIPTION':
                 kv = kf[r].get('Description')
+            if kv is None and k.upper() == 'PARTNR':                 # library clean-up: PARTNR -> MPN
+                kv = kf[r].get('MPN')
+            if kv is None and k.upper() in ('OC_DIGIKEY', 'OC_FARNELL', 'OC_NEWARK'):   # -> SUPPLIER_PART_NUMBERn
+                sup = {'OC_DIGIKEY': 'Digi-Key', 'OC_FARNELL': 'Farnell', 'OC_NEWARK': 'Newark'}[k.upper()]
+                kv = next((kf[r].get(f'SUPPLIER_PART_NUMBER{i}') for i in range(1, 4)
+                           if kf[r].get(f'SUPPLIER{i}') == sup), None)
             if kv is None:
                 missing.append(f'{r}.{k}')
             elif kv.strip() != v.strip():
@@ -4492,6 +4562,8 @@ def main():
         if a.libfix:
             progress(34, 'Library clean-up')
             run_libfix(d)
+            sheets = [Sheet(p) for p in sorted(glob.glob(os.path.join(d, '*.kicad_sch')))]
+            libfix_sync_instances(d, sheets, a.dry_run)
         if has_pcb:
             sheets = [Sheet(p) for p in sorted(glob.glob(os.path.join(d, '*.kicad_sch')))]
             progress(36, 'Net names and fields schematic -> PCB')
