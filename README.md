@@ -45,7 +45,7 @@ Manual install also works: copy the `plugins/` folder to `Documents/KiCad/10.0/s
 
 ## Use
 
-Open the **PCB Editor from the KiCad project manager**, not as a standalone app, then click the tombstone.
+The tombstone button lives in the **PCB Editor**, and KiCad opens the PCB Editor only for a project. So first open **any** KiCad project in the project manager (or make an empty one: *File → New Project*), open its PCB Editor, then click the tombstone. For a one-click import that project is only the starting point: the Eagle design gets its own new project, which KiCad switches to.
 
 - **One-click import (Windows).** Pick the Eagle `.sch` or `.brd`, then the destination: a new `<design>_kicad` sub-folder next to the Eagle file, or any folder you choose. Eagle Exhumer then runs the whole chain unattended:
   1. drives KiCad's own *File → Import Non-KiCad Project → EAGLE*, filling in the dialogs and auto-matching layers;
