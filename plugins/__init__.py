@@ -738,7 +738,7 @@ class ImportJob:
         drivers = []
         def reopen():
             if rid is not None:
-                _menu(self.mgr, rid)
+                _menu_action(self.mgr, rid)
                 return
             try:
                 from win_dialogs import DialogDriver
@@ -746,20 +746,32 @@ class ImportJob:
                 drv.start(); drivers.append(drv)
             except Exception as ex:
                 self.log(f'project reload: no dialog driver ({ex})')
-            _menu(self.mgr, oid)
-        def check(again=True):
+            # KiCad 10 manager menus are ACTION_MENUs: a plain wxEVT_MENU to the frame does nothing
+            _menu_action(self.mgr, oid)
+        def wait(again, t0=None):
+            t0 = t0 or time.time()
+            if drivers and not drivers[-1].done and drivers[-1].is_alive() and time.time() - t0 < 60:
+                wx.CallLater(500, wait, again, t0); return
             for drv in drivers:
                 drv.stop_flag = True               # the open dialog is answered; touch no other box
+            ok = rid is not None or (drivers and drivers[-1].done)
+            wx.CallLater(2000, check, again, ok)
+        def check(again, ok):
             try:
                 if open(pro, 'rb').read() != fixed:
                     with open(pro, 'wb') as f:
                         f.write(fixed)
                     if again:
-                        reopen(); wx.CallLater(4000, check, False); return
-                self.log('project reloaded from disk (fixed design rules and net classes are active)')
+                        reopen(); wait(False); return
+                if ok:
+                    self.log('project reloaded from disk (fixed design rules and net classes are active)')
+                else:
+                    self.log('\nNOTE: reopen the project (File > Open Project) before saving in KiCad - '
+                             'it still holds the project settings from before the fix.')
+                    self.reload_note = True
             except Exception as ex:
                 self.log(f'project reload check failed: {ex}')
-        wx.CallLater(200, lambda: (reopen(), wx.CallLater(4000, check)))
+        wx.CallLater(200, lambda: (reopen(), wait(True)))
 
     def _finish(self, rc):
         self._stop_driver()
