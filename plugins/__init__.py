@@ -714,9 +714,11 @@ class ImportJob:
 
     def _reload_project(self):
         """KiCad keeps the project settings (net classes, design rules, ...) in memory from before the
-        fix; the next save of a reopened editor writes them back over the fixed .kicad_pro. Reload the
-        project from disk through File > Open Recent (KiCad's own path, any UI language). If KiCad
-        writes its old copy while closing, the fixed file is put back and loaded once more."""
+        fix; opening an editor writes them back over the fixed .kicad_pro (seen: Default 0.2 mm, the
+        Eagle net classes gone). Reload the project from disk: File > Open Recent when KiCad lists it,
+        else File > Open Project (Ctrl+O) with the path typed into the file dialog - a project made
+        by the import is not in the recent list. If KiCad writes its old copy while switching, the
+        fixed file is put back and loaded once more."""
         pro = self.pro
         if not self.mgr or not os.path.isfile(pro) or getattr(self, 'other_project', False):
             return
@@ -725,25 +727,39 @@ class ImportJob:
             t = label.split('\t')[0].replace('&&', '\x00').replace('&', '').replace('\x00', '&').strip()
             t = re.sub(r'^\d+\s+', '', t)
             return os.path.normcase(os.path.abspath(t)) == want if t else False
-        mid = _find_item(self.mgr, is_pro)
-        if mid is None:
-            self.log('\nNOTE: reopen the project (File > Open Recent) before saving in KiCad - '
+        rid = _find_item(self.mgr, is_pro)
+        oid = _find_item(self.mgr, lambda l: l.endswith('\tCtrl+O')) if os.name == 'nt' else None
+        if rid is None and oid is None:
+            self.log('\nNOTE: reopen the project (File > Open Project) before saving in KiCad - '
                      'it still holds the project settings from before the fix.')
             self.reload_note = True
             return
         fixed = open(pro, 'rb').read()
-        _menu(self.mgr, mid)
+        drivers = []
+        def reopen():
+            if rid is not None:
+                _menu(self.mgr, rid)
+                return
+            try:
+                from win_dialogs import DialogDriver
+                drv = DialogDriver([pro], log=self.log, timeout=60)
+                drv.start(); drivers.append(drv)
+            except Exception as ex:
+                self.log(f'project reload: no dialog driver ({ex})')
+            _menu(self.mgr, oid)
         def check(again=True):
+            for drv in drivers:
+                drv.stop_flag = True               # the open dialog is answered; touch no other box
             try:
                 if open(pro, 'rb').read() != fixed:
                     with open(pro, 'wb') as f:
                         f.write(fixed)
                     if again:
-                        _menu(self.mgr, mid); wx.CallLater(2500, check, False); return
+                        reopen(); wx.CallLater(4000, check, False); return
                 self.log('project reloaded from disk (fixed design rules and net classes are active)')
             except Exception as ex:
                 self.log(f'project reload check failed: {ex}')
-        wx.CallLater(2500, check)
+        wx.CallLater(200, lambda: (reopen(), wx.CallLater(4000, check)))
 
     def _finish(self, rc):
         self._stop_driver()
