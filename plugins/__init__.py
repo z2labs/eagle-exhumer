@@ -771,6 +771,7 @@ class ImportJob:
                     self.reload_note = True
             except Exception as ex:
                 self.log(f'project reload check failed: {ex}')
+            self._save_log()                       # the console log on disk gets the reload result too
         wx.CallLater(200, lambda: (reopen(), wait(True)))
 
     def _finish(self, rc):
