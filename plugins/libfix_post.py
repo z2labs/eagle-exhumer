@@ -37,8 +37,10 @@ TOOLS_DIR = os.path.join(PLUGINS_DIR, 'libfix')
 
 SCRIPTS = [
     ('unique_rc_symbols', 'Task 1 - create unique R/L/C symbols'),
-    ('set_value',         'Task 1b - set Value fields'),
     ('replace_rc',        'Task 2 - replace R/L/C instances'),
+    # Value after the replacement: only then do the new R/L/C symbols have placed parts, so each
+    # gets its one Value (before it, set_value only sees the shared generic symbols and skips them)
+    ('set_value',         'Task 1b - set Value fields'),
     ('add_mpn',           'Task 3 - add MPN and supplier fields'),
 ]
 

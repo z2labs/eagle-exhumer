@@ -963,7 +963,7 @@ def libfix_sync_instances(proj_dir, sheets, dry):
                         lsrc = lib[name.split(':', 1)[1]]
                         cp = {str(p[1]): p for p in kids(s, 'property') if len(p) > 2}
                         for p_ in kids(lsrc, 'property'):
-                            if len(p_) > 2 and str(p_[1]) not in ('Reference', 'Value'):
+                            if len(p_) > 2 and str(p_[1]) != 'Reference':
                                 if str(p_[1]) in cp:
                                     cp[str(p_[1])][2] = Q(str(p_[2]))
                                 else:
