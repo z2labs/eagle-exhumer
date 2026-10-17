@@ -776,8 +776,8 @@ class ImportJob:
 
     def _finish(self, rc):
         self._stop_driver()
-        if rc in (0, 1):
-            try:
+        if rc in (0, 1, 3):                        # the project files were fixed (a FAIL / self-check
+            try:                                   # verdict too): KiCad must not keep its old settings
                 self._reload_project()
             except Exception as ex:
                 self.log(f'project reload failed: {ex}')
