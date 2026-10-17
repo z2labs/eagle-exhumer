@@ -4336,7 +4336,10 @@ def selftest(d, proj, cli, esch, ebrd):
     # F7: a plated through-hole pad turned non-plated (copper, position and drill unchanged)
     for fp in fps:
         if id(fp) in used: continue
-        tp = [p_ for p_ in kids(fp, 'pad') if len(p_) > 2 and p_[2] == 'thru_hole']
+        # a round drill only: an oval one may be a plated slot made from Eagle's milled contour
+        # (plated_milling_slots) - Eagle has no plating for it, so there is nothing to check against
+        tp = [p_ for p_ in kids(fp, 'pad') if len(p_) > 2 and p_[2] == 'thru_hole'
+              and not any(str(x) == 'oval' for d_ in kids(p_, 'drill') for x in d_)]
         if tp:
             tp[0][2] = 'np_thru_hole'
             used.add(id(fp))
