@@ -34,7 +34,7 @@ _ACTIVE = []          # keep running jobs referenced after the PCB frame closes
 def _ask_libfix():
     """Optional library clean-up (plugins/libfix, contributed by Robert Katona)."""
     dlg = wx.MessageDialog(None, 'Also clean up the symbol library?\n\n'
-                           '- every R / L / C part gets its own symbol (value + footprint + part number)\n'
+                           '- every R / L / C part, and every symbol used with more than one value, gets its own symbol (value + footprint + part number)\n'
                            '- Value, MPN and SUPPLIER1..3 / SUPPLIER_PART_NUMBER1..3 fields from the Eagle attributes\n'
                            '- all symbol pins set to bidirectional (power symbols, passive and not-connected pins '
                            'stay); PWR_FLAGs then go where the supply comes from\n\n'
