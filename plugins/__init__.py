@@ -772,6 +772,12 @@ class ImportJob:
             except Exception as ex:
                 self.log(f'project reload check failed: {ex}')
             wx.CallLater(500, self._save_log)      # after the queued log lines: the saved log gets the result too
+            def _front():                          # reopening the project brings the KiCad window to the
+                try:                               # front: the verdict window must not hide behind it
+                    self.win.Raise()
+                except Exception:
+                    pass
+            wx.CallLater(800, _front)
         wx.CallLater(200, lambda: (reopen(), wait(True)))
 
     def _finish(self, rc):
