@@ -544,20 +544,35 @@ class ImportJob:
         self.import_meta['gui_import_s'] = round(time.time() - t0, 1)
         self.stage(16, 'Step 2/3 - Saving the imported project')
         # KiCad 10.0.5 leaves both editors unsaved -> File > Save in each, then close them
-        for f in self._editor_frames():
+        frames = self._editor_frames()
+        for f in frames:
             mid = _find_item(f, lambda l: l.endswith('\tCtrl+S'))
             self.log(f'  saving: {f.GetTitle()}')
+            if sys.platform == 'darwin':
+                continue                     # macOS: the menu event does not reach the action, see below
             _menu_action(f, mid)
+        if sys.platform == 'darwin':
+            # a real Cmd+S in each editor window (System Events, same permission as the dialogs)
+            import mac_dialogs
+            res = []
+            th = threading.Thread(target=lambda: res.append(mac_dialogs.save_windows(self.name)), daemon=True)
+            th.start()
+            def report(tries=0):
+                if th.is_alive() and tries < 60:
+                    wx.CallLater(500, report, tries + 1); return
+                self.log(f'  Cmd+S sent to: {res[0] if res else "nothing (timeout)"}')
+            wx.CallLater(500, report)
         wx.CallLater(1500, self._close_editors_then_fix)
 
     def _close_editors_then_fix(self, tries=0):
         need = ('.kicad_sch',) if self.cli_pcb else ('.kicad_sch', '.kicad_pcb')
         missing = [e for e in need if not os.path.isfile(os.path.join(self.target, self.name + e))]
-        if missing and tries < 20:
+        if missing and tries < 60:            # slower Macs need more than 10 s for a big board
             wx.CallLater(500, self._close_editors_then_fix, tries + 1); return
         if missing:
             self.log(f'\nNot saved by KiCad: {missing} - save the editors manually, then run the fix-only .bat')
             self._stop_driver()
+            wx.CallLater(300, self._save_log)
             self.win.finish(False, 'Stopped - KiCad did not save the imported project',
                             'Save the schematic and the PCB editor (Ctrl+S), then click the Eagle Exhumer button '
                             'and choose "Fix + check the OPEN project".', can_open=False)

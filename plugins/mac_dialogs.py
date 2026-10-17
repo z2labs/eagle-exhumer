@@ -167,7 +167,9 @@ class DialogDriver(threading.Thread):
         for path in self.steps:
             t0 = time.time(); handled = False
             while not self.stop_flag and time.time() - t0 < self.timeout:
-                for d in _dialogs(self.pid):
+                cur = _dialogs(self.pid)
+                self.seen &= set(cur)
+                for d in cur:
                     if d in self.seen:
                         continue
                     kind, idx, title = d
@@ -181,6 +183,12 @@ class DialogDriver(threading.Thread):
                         continue
                     self.log(f'  [dialog "{title}"] <- {path}')
                     self.done.append(path); handled = True
+                    # the next panel usually reuses the same window index and title ("Open"):
+                    # forget this one as soon as it is gone, or the next would look already handled
+                    t1 = time.time()
+                    while d in _dialogs(self.pid) and time.time() - t1 < 15:
+                        time.sleep(0.3)
+                    self.seen.discard(d)
                     break
                 if handled:
                     break
@@ -193,7 +201,9 @@ class DialogDriver(threading.Thread):
     def _info_ok(self, timeout=1800):
         t0 = time.time()
         while not self.stop_flag and time.time() - t0 < timeout:
-            for d in _dialogs(self.pid):
+            cur = _dialogs(self.pid)
+            self.seen &= set(cur)                        # a closed box's slot can be reused
+            for d in cur:
                 if d in self.seen:
                     continue
                 kind, idx, title = d
@@ -210,3 +220,30 @@ class DialogDriver(threading.Thread):
                 self.messages.append((title, text[:300], why))
                 self.log(f'  [KiCad message, {why}] "{title}" {text[:160]}')
             time.sleep(0.5)
+
+
+
+def save_windows(name, pid=None):
+    """Cmd+S in every editor window of the project NAME (schematic / PCB editor; not the project
+    manager, not our own window). Returns the window names or the error. The AX title of a frame
+    is not always wx's GetTitle() (modified marker), so the windows are matched by project name.
+    KiCad's ACTION_MENU items do not react to a synthesized wxEVT_MENU on macOS, a keystroke does."""
+    pid = pid or os.getpid()
+    rc, out, err = _osa(f'''
+tell application "System Events"
+  set p to {_proc(pid)}
+  set done to {{}}
+  repeat with w in (windows of p)
+    set n to name of w as text
+    if n contains {_q(name)} and n does not contain "KiCad 1" and n does not start with "Eagle Exhumer" then
+      perform action "AXRaise" of w
+      set frontmost of p to true
+      delay 0.6
+      keystroke "s" using command down
+      delay 1.5
+      set end of done to n
+    end if
+  end repeat
+  return done
+end tell''', timeout=60)
+    return out if rc == 0 else 'error: ' + err[:160]
