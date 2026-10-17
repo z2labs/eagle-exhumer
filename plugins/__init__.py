@@ -109,6 +109,20 @@ def _eagle_import_id(frame):
     return None
 
 
+
+def _dialog_driver():
+    """The native file-dialog filler of this platform, or None (then the user picks files by hand)."""
+    try:
+        if os.name == 'nt':
+            from win_dialogs import DialogDriver
+            return DialogDriver
+        if sys.platform == 'darwin':
+            import mac_dialogs
+            return mac_dialogs.DialogDriver if mac_dialogs.available() else None
+    except Exception:
+        pass
+    return None
+
 def _manager():
     """(frame, eagle_import_menu_id) of the KiCad project manager in this process."""
     for w in wx.GetTopLevelWindows():
@@ -475,7 +489,7 @@ class ImportJob:
             return
         self.log('\n1b) KiCad Eagle import of the schematic (File > Import Non-KiCad Project > EAGLE)...')
         self.stage(6, 'Step 1/3 - KiCad imports the schematic')
-        from win_dialogs import DialogDriver
+        DialogDriver = _dialog_driver()
         # file dialog, destination dialog, then (full GUI import only) the layer-mapping dialog;
         # the driver keeps confirming KiCad's info boxes until the whole run is over
         self.driver = DialogDriver([gui_src, self.target], log=self.log, layer_mapping=not self.cli_pcb)
@@ -728,7 +742,7 @@ class ImportJob:
             t = re.sub(r'^\d+\s+', '', t)
             return os.path.normcase(os.path.abspath(t)) == want if t else False
         rid = _find_item(self.mgr, is_pro)
-        oid = _find_item(self.mgr, lambda l: l.endswith('\tCtrl+O')) if os.name == 'nt' else None
+        oid = _find_item(self.mgr, lambda l: l.endswith(('\tCtrl+O', '\tCmd+O'))) if _dialog_driver() else None
         if rid is None and oid is None:
             self.log('\nNOTE: reopen the project (File > Open Project) before saving in KiCad - '
                      'it still holds the project settings from before the fix.')
@@ -741,7 +755,7 @@ class ImportJob:
                 _menu_action(self.mgr, rid)
                 return
             try:
-                from win_dialogs import DialogDriver
+                DialogDriver = _dialog_driver()
                 drv = DialogDriver([pro], log=self.log, timeout=60)
                 drv.start(); drivers.append(drv)
             except Exception as ex:
@@ -915,7 +929,7 @@ class Eagle2KiCadImport(pcbnew.ActionPlugin):
                           '(the Eagle import is a project-manager function).', 'Eagle Exhumer', wx.ICON_WARNING)
             return
         modes = ['Fix + check the OPEN project (already imported with File > Import > EAGLE)']
-        if os.name == 'nt':
+        if _dialog_driver():
             modes.insert(0, 'One-click import of an Eagle design into a NEW KiCad project')
         if len(modes) > 1:
             dlg = wx.SingleChoiceDialog(None, 'What should Eagle Exhumer do?', 'Eagle Exhumer', modes)
