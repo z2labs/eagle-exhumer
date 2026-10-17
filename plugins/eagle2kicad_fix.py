@@ -3669,7 +3669,9 @@ def apply_design_rules(pro_path, brd, dry):
     r = ds.setdefault('rules', {})
     setv = {}
     if clear: setv['min_clearance'] = min(clear)
-    if g('msWidth'): setv['min_track_width'] = g('msWidth')
+    # floor to 1 um: 4.5 mil = 0.1143 mm, but binary EAGLE files store such tracks as 0.1142 mm -
+    # a 0.1 um "violation" on every one of them is noise, not a design issue
+    if g('msWidth'): setv['min_track_width'] = math.floor(g('msWidth') * 1000 + 1e-6) / 1000
     if g('msDrill'): setv['min_through_hole_diameter'] = g('msDrill')
     rings = [v for v in (g(k) for k in ('rlMinViaOuter', 'rlMinPadTop', 'rlMinPadBottom')) if v]
     if rings: setv['min_via_annular_width'] = min(rings)   # KiCad checks vias AND PTH pads with this
