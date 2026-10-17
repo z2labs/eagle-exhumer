@@ -28,7 +28,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from libfix_sexp import apply_edits, find, indent_block, parse_sexp      # noqa: E402
 from libfix_model import (LIB_NAME, SymbolLib, backup_files,          # noqa: E402
-                            build_rc_plan, is_rc_reference,
+                            build_rc_plan, is_rc_reference, multi_value_bases, needs_unique,
                             iter_instances, quote_string, sheet_files,
                             write_report)
 
@@ -61,15 +61,16 @@ def append_to_cache(text: str, blocks: list) -> str:
             + text[prev + 1:])
 
 
-def process_sheet(path: str, lib: SymbolLib, plan, log: list, dry_run: bool):
+def process_sheet(path: str, lib: SymbolLib, plan, log: list, dry_run: bool, multi=None):
     """Re-point one sheet; returns ``(replaced, added, removed)``."""
     sfile, instances, cached = iter_instances(path)
+    multi = multi or {}
     name = os.path.basename(path)
 
     edits, wanted, users_after, users_before = [], {}, {}, {}
     for inst in instances:
         users_before[inst.base] = users_before.get(inst.base, 0) + 1
-        if not is_rc_reference(inst.reference) or inst.lib != LIB_NAME:
+        if not needs_unique(inst, multi) or inst.lib != LIB_NAME:
             users_after[inst.base] = users_after.get(inst.base, 0) + 1
             continue
         new_name = plan.lookup(inst.base, inst.value, inst.footprint, inst.partnr)
@@ -125,6 +126,7 @@ def main(argv=None) -> int:
     lib = SymbolLib()
     sheets = sheet_files()
     plan, picked, notes = build_rc_plan(sheets, lib)
+    multi = multi_value_bases(sheets)
     log.append('library : %s (%d symbols)' % (lib.path, len(lib.symbols)))
     log.append('R/L/C instances to re-point : %d' % len(picked))
     log += ['NOTE  ' + n for n in notes]
@@ -136,7 +138,7 @@ def main(argv=None) -> int:
 
     replaced = added = removed = 0
     for sheet in sheets:
-        c, a, r = process_sheet(sheet, lib, plan, log, args.dry_run)
+        c, a, r = process_sheet(sheet, lib, plan, log, args.dry_run, multi)
         replaced, added, removed = replaced + c, added + a, removed + r
         if c:
             log.append('----  %s: %d instances re-pointed, %d cached defs added, '

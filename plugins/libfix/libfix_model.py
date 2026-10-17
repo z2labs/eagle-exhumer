@@ -284,16 +284,39 @@ class NamePlan:
         return self.names.get((base, value, footprint_leaf(footprint), partnr))
 
 
-def build_rc_plan(sheets: List[str], lib: SymbolLib,
-                  skip_converted: bool = True) -> Tuple[NamePlan, List[Instance], List[str]]:
-    """Scan every sheet for R/L/C instances and build the unique-name plan."""
-    plan = NamePlan()
-    picked: List[Instance] = []
-    notes: List[str] = []
+def multi_value_bases(sheets: List[str]) -> Dict[str, set]:
+    """Project-library symbols used by BOM parts with more than one distinct ``Value``
+    (``base -> {values}``). A library symbol can carry only one ``Value``, so such a
+    symbol has to be split one-per-value like the R/L/C ones - otherwise its library
+    ``Value`` stays empty and *Update Symbols from Library* empties the parts' values."""
+    seen: Dict[str, set] = {}
     for sheet in sheets:
         _, instances, _ = iter_instances(sheet)
         for inst in instances:
-            if not is_rc_reference(inst.reference):
+            if inst.lib == LIB_NAME and inst.in_bom:
+                seen.setdefault(inst.base, set()).add(inst.value)
+    return {b: v for b, v in seen.items() if len(v) > 1}
+
+
+def needs_unique(inst: Instance, multi: Dict[str, set]) -> bool:
+    """R / L / C parts, and every part whose symbol is used with several values."""
+    return is_rc_reference(inst.reference) or (inst.in_bom and inst.base in multi)
+
+
+def build_rc_plan(sheets: List[str], lib: SymbolLib,
+                  skip_converted: bool = True) -> Tuple[NamePlan, List[Instance], List[str]]:
+    """Scan every sheet for R/L/C and multi-value instances and build the unique-name plan."""
+    plan = NamePlan()
+    picked: List[Instance] = []
+    notes: List[str] = []
+    multi = multi_value_bases(sheets)
+    for b in sorted(multi):
+        notes.append('%s is used with %d values (%s) - one symbol per value'
+                     % (b, len(multi[b]), ', '.join(sorted(v or '(empty)' for v in multi[b]))[:120]))
+    for sheet in sheets:
+        _, instances, _ = iter_instances(sheet)
+        for inst in instances:
+            if not needs_unique(inst, multi):
                 continue
             if inst.lib != LIB_NAME:
                 notes.append('%s: %s uses %s which is not the project library - skipped'
