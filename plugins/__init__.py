@@ -161,10 +161,24 @@ def _click(btn):
 
 
 def _project():
+    """The .kicad_pro of the open project. Some KiCad 10 builds (seen: 10.0.7 on Linux) return a bare
+    SwigPyObject from SETTINGS_MANAGER.Prj(); then the board open in the PCB editor names the project."""
     try:
-        return pcbnew.GetSettingsManager().Prj().GetProjectFullName()
+        p = pcbnew.GetSettingsManager().Prj().GetProjectFullName()
+        if p:
+            return p
     except Exception:
-        return ''
+        pass
+    try:
+        b = pcbnew.GetBoard()
+        f = b.GetFileName() if b else ''
+        if f:
+            pro = os.path.splitext(f)[0] + '.kicad_pro'
+            if os.path.isfile(pro):
+                return pro
+    except Exception:
+        pass
+    return ''
 
 
 def _norm(p):
