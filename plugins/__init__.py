@@ -333,7 +333,13 @@ class LogWindow(wx.Frame):
         self.txt.Show(show)
         self.b_details.SetLabel('Hide details' if show else 'Show details')
         w, h = self.GetSize()
-        self.SetSize((w, max(h, 640) if show else 300 + (60 if self.done else 0)))
+        if show:
+            h = max(h, 640)
+        else:                                  # tall enough for the (wrapped) verdict text and the buttons
+            self.panel.Layout()
+            deco = self.GetSize()[1] - self.GetClientSize()[1]
+            h = max(300 + (60 if self.done else 0), self.panel.GetBestSize()[1] + deco + 10)
+        self.SetSize((w, h))
         self.panel.Layout()
 
     # -- end state
@@ -836,6 +842,10 @@ class ImportJob:
         other = getattr(self, 'other_project', False)
         if other:
             warn += '\n\nThis project is not the one loaded in KiCad: open it with File > Open Project to see the result.'
+        elif rc in (0, 1):
+            warn += ('\n\nThe project is open in this KiCad window - keep working here. Do not open it again in a '
+                     'second KiCad (KiCad then warns "already open" and the two would overwrite each other\'s saves); '
+                     'to reopen it later, close KiCad completely first.')
         if rc == 0:
             self.win.finish(True, 'Done - QC PASS',
                             'The KiCad project matches the Eagle source. Open the schematic or the PCB below; '
