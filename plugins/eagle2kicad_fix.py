@@ -1765,10 +1765,29 @@ def fix_unused_label_islands(cli, root_sch, sheets, tmpdir):
         for sh in sheets: sh.save()
         R.p(f'{len(plan)} unused label pieces found, but removing them changed the netlist -> left in place'); return
     nc = 0
+    # the pin that lost its label: KiCad's ERC names it (pin_not_connected) - the geometric pin
+    # candidates (two mirror/rotate orders) may point at a wire point instead of the real pin
+    erc2 = erc_run(cli, root_sch, tmpdir)
+    open_pins = []
+    for s_ in (erc2 or {}).get('sheets', []):
+        for v in s_.get('violations', []):
+            if v['type'] == 'pin_not_connected' and v.get('items') and 'pos' in v['items'][0]:
+                open_pins.append(v['items'][0]['pos'])
     for sh, kind, wires, labels, juncs, npin, names in plan:
         if kind == 'single':
-            for (x, y) in npin:
-                sh.tree.append(['no_connect', ['at', f'{x:g}', f'{y:g}'], ['uuid', new_uuid()]]); nc += 1
+            near = set()
+            for w in wires:
+                xy = kids(kid(w, 'pts') or [], 'xy')
+                near.update((round(float(q[1]), 2), round(float(q[2]), 2)) for q in xy[:2])
+            near.update(npin)
+            for lb in labels:
+                at = kid(lb, 'at'); near.add((round(float(at[1]), 2), round(float(at[2]), 2)))
+            cand = _sheet_pins_fresh(sh)
+            for pos in open_pins:
+                x, y = erc_xy(pos, sh)
+                if any(abs(x - a) <= 0.02 and abs(y - b) <= 0.02 for a, b in near) and \
+                        (round(x, 2), round(y, 2)) in cand:
+                    sh.tree.append(['no_connect', ['at', f'{x:g}', f'{y:g}'], ['uuid', new_uuid()]]); nc += 1
             for lb in labels:                           # the name stays readable as a plain text note
                 at = kid(lb, 'at'); ang = int(float(at[3])) % 360 if len(at) > 3 else 0
                 rot, just = (0, 'left') if ang == 0 else (90, 'left') if ang == 90 else (0, 'right') if ang == 180 else (90, 'right')
