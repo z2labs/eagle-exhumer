@@ -1623,6 +1623,58 @@ def _wire_island(sh, seed_wire):
     return isl, labels, juncs, segs, pts, touches
 
 
+def _dead_end_chain(sh, w0, pins):
+    """A wire branch ending in free space: from the free end back to the first point where a pin,
+    label, junction, no-connect or a third wire is. Returns the wires of the branch, or [] when the
+    wire has no free end or the branch carries a label / pin."""
+    def ends(w):
+        xy = kids(kid(w, 'pts') or [], 'xy')
+        return [(round(float(p[1]), 2), round(float(p[2]), 2)) for p in xy[:2]]
+    wires = [w for w in kids(sh.tree, 'wire') if len(ends(w)) == 2]
+    cnt = Counter(p for w in wires for p in ends(w))
+    special = set(pins)
+    for head in _LBL + ('junction', 'no_connect'):
+        for x in kids(sh.tree, head):
+            at = kid(x, 'at')
+            if at: special.add((round(float(at[1]), 2), round(float(at[2]), 2)))
+    def on_interior(p, skip):
+        for w in wires:
+            if w is skip:
+                continue
+            a, b = ends(w)
+            if p in (a, b):
+                continue
+            if min(a[0], b[0]) - .011 <= p[0] <= max(a[0], b[0]) + .011 and min(a[1], b[1]) - .011 <= p[1] <= max(a[1], b[1]) + .011 \
+                    and abs((b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])) <= .011 * max(abs(b[0] - a[0]), abs(b[1] - a[1]), 1e-9):
+                return True
+        return False
+    def interior_special(w):
+        a, b = ends(w)
+        for p in special:
+            if p in (a, b):
+                continue
+            if min(a[0], b[0]) - .011 <= p[0] <= max(a[0], b[0]) + .011 and min(a[1], b[1]) - .011 <= p[1] <= max(a[1], b[1]) + .011 \
+                    and abs((b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])) <= .011 * max(abs(b[0] - a[0]), abs(b[1] - a[1]), 1e-9):
+                return True
+        return False
+    free = [p for p in ends(w0) if cnt[p] == 1 and p not in special and not on_interior(p, w0)]
+    if len(free) != 1:
+        return []
+    chain, w, F = [], w0, free[0]
+    while True:
+        if interior_special(w):
+            return []
+        chain.append(w)
+        a, b = ends(w)
+        G = b if a == F else a
+        if G in special or cnt[G] != 2 or on_interior(G, w):
+            return chain
+        nxt = [o for o in wires if o is not w and G in ends(o)]
+        if len(nxt) != 1 or any(nxt[0] is c for c in chain):
+            return chain
+        w, F = nxt[0], G
+
+
 def fix_unused_label_islands(cli, root_sch, sheets, tmpdir):
     """Eagle leftovers ERC reports as 'unconnected wire endpoint' / 'Label connected to only one pin':
       - a wire piece with a net label but no pin on it (an Eagle label that names nothing):
@@ -1684,6 +1736,12 @@ def fix_unused_label_islands(cli, root_sch, sheets, tmpdir):
                 continue                                # sheet interface: leave it
             names = {str(lb[1]) for lb in labels}
             npin = [p for p in pins if touches(p)]
+            if node[0] == 'wire' and npin:              # a branch of a real net that ends in free space
+                chain = _dead_end_chain(sh, node, pins)
+                if chain and not any(id(x) in done_ids for x in chain):
+                    plan.append((sh, 'deadend', chain, [], [], set(), set()))
+                    done_ids.update(id(x) for x in chain)
+                continue
             if node[0] == 'wire' and not npin and len(names) <= 1:
                 kind_ = 'nopin'
             elif node[0] in _LBL and len(npin) == 1 and len(names) == 1 and kind in ('isolated_pin_label', 'label_single_pin'):
@@ -1723,6 +1781,8 @@ def fix_unused_label_islands(cli, root_sch, sheets, tmpdir):
     single = sorted({n for _, k, _, _, _, _, ns in plan if k == 'single' for n in ns})
     nopin = sorted({n for _, k, _, _, _, _, ns in plan if k in ('nopin', 'label') for n in ns})
     n_np = sum(1 for p in plan if p[1] in ('nopin', 'label'))
+    n_de = sum(1 for p in plan if p[1] == 'deadend')
+    R.p(f'{n_de} wire branches ending in free space (no label, no pin on them) removed')
     R.p(f'{n_np} wire pieces without any pin removed (labels: {", ".join(nopin) if nopin else "none"}); netlist unchanged')
     R.p(f'{len(single)} labels whose net reaches only one pin -> no-connect flag on the pin ({nc}), the name kept as a text note'
         + (': ' + ', '.join(single[:30]) if single else ''))
@@ -3190,8 +3250,10 @@ def fix_dangling_track_ends(cli, pcb_path, tmpdir, dry):
         worse = ['DRC failed']
     else:
         b0, b1 = bad(d0), bad(d1)
-        for k in set(b1) | set(b0):
-            if k != 'track_dangling' and b1[k] > b0[k]:
+        guard = ('unconnected_items', 'shorting_items', 'clearance', 'hole_clearance', 'track_width',
+                 'tracks_crossing', 'copper_edge_clearance', 'connection_width', 'via_dangling', 'items_not_allowed')
+        for k in guard:                               # (zone-fill dependent counts such as solder mask bridges
+            if b1[k] > b0[k]:                         #  move between refills - not a connectivity check)
                 worse.append(f'{k} {b0[k]}->{b1[k]}')
     if worse:
         for f, b in baks:
