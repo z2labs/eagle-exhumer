@@ -2060,6 +2060,12 @@ def verify_geometry(pcb_path, ebrd):
     """Independent geometry check of the KiCad board against the Eagle .brd (ground truth):
     part placement / side / rotation, copper length per net, via count + drill per net,
     copper polygons per net, board outline length, drill histogram."""
+    global _TRACK_EDITS_FILE
+    try:
+        f = os.path.join(os.path.dirname(pcb_path), 'eaglefix_track_edits.json')
+        _TRACK_EDITS_FILE = json.load(open(f, encoding='utf-8')) if os.path.isfile(f) else {}
+    except Exception:
+        _TRACK_EDITS_FILE = {}
     import math
     try:
         import pcbnew
@@ -2229,6 +2235,8 @@ def verify_geometry(pcb_path, ebrd):
     for n in sorted(set(e_len) | set(e_via)):
         k = emap.get(n) or kn.get(n.replace('!', ''), kn.get(n))
         el, kl = e_len.get(n, 0), k_len.get(k, 0) if k else 0
+        if k:
+            kl += _TRACK_EDITS_FILE.get(k, TRACK_EDIT_LEN.get(k, 0))          # bend pieces the track-end clean-up removed inside a via / pad
         if abs(el - kl) > max(0.01, 0.002 * el):
             n_len += 1
             if n_len <= 10: issues.append(f'net `{n}` copper length Eagle {el:.3f} mm, KiCad {kl:.3f} mm')
@@ -3044,6 +3052,9 @@ def assign_orphan_pads(pcb_path, dry):
         pcbnew.SaveBoard(pcb_path, board)
 
 
+_TRACK_EDITS_FILE = {}
+TRACK_EDIT_LEN = Counter()     # net -> copper length the track-end clean-up removed (+) / added (-), mm
+
 def fix_dangling_track_ends(cli, pcb_path, tmpdir, dry):
     """DRC 'Track has unconnected end': Eagle connects by copper overlap. Typical leftovers are short
     arcs / pieces of a bend lying entirely inside a via or pad, or a track ending beside the pad
@@ -3103,7 +3114,8 @@ def fix_dangling_track_ends(cli, pcb_path, tmpdir, dry):
             return 'via'
         return f'{o.GetParentFootprint().GetReference()}.{o.GetNumber()}'
     removed, joined, snapped, left = [], [], [], []
-    act_rm, act_add, act_mv = set(), [], []          # applied to the board FILE below: an in-process
+    act_rm, act_add, act_mv = set(), [], []
+    led = Counter()          # applied to the board FILE below: an in-process
                                                       # board edit breaks later pcbnew.LoadBoard calls
     for u in ids:
         t = by_id.get(u)
@@ -3111,7 +3123,8 @@ def fix_dangling_track_ends(cli, pcb_path, tmpdir, dry):
             continue
         o = covered_by(t)
         if o is not None:
-            removed.append(f'{t.GetNetname()} in {name(o)}'); act_rm.add(u); segs[:] = [x for x in segs if x is not t]; continue
+            removed.append(f'{t.GetNetname()} in {name(o)}'); act_rm.add(u); segs[:] = [x for x in segs if x is not t]
+            led[t.GetNetname()] += t.GetLength() / 1e6; continue
         L, n = t.GetLayer(), t.GetNetCode()
         fixed = False
         for which in ('start', 'end'):
@@ -3123,6 +3136,7 @@ def fix_dangling_track_ends(cli, pcb_path, tmpdir, dry):
                 c = o.GetPosition()
                 if c.x != P.x or c.y != P.y:
                     act_add.append((u, P.x, P.y, c.x, c.y)); fixed = True
+                    led[t.GetNetname()] -= dist(P, c) / 1e6
                     joined.append(f'{t.GetNetname()} -> {name(o)}')
                 continue
             best = None
@@ -3186,6 +3200,15 @@ def fix_dangling_track_ends(cli, pcb_path, tmpdir, dry):
             f'({", ".join(worse)}) -> undone'); return
     for f, b in baks:
         os.remove(b)
+    TRACK_EDIT_LEN.update(led)
+    try:                                              # kept with the project: a later re-check sees it too
+        f = os.path.join(os.path.dirname(pcb_path), 'eaglefix_track_edits.json')
+        old_ = json.load(open(f, encoding='utf-8')) if os.path.isfile(f) else {}
+        for k_, v_ in led.items():
+            old_[k_] = old_.get(k_, 0) + v_
+        _save_json(old_, f)
+    except Exception as ex:
+        R.p(f'  (could not record the length changes: {ex})')
     n1 = bad(d1)['track_dangling']
     R.p(f'DRC "track has unconnected end": {len(ids)} -> {n1}; no new DRC error')
     R.p(f'  {len(removed)} bend pieces lying completely inside a via / pad of their net removed (copper unchanged)')
