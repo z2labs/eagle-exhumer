@@ -429,7 +429,9 @@ def compare_nets(truth, test, label, ignore_refs=()):
         if len(kn) > 1:
             split.append((tname, sorted(kn)))
         elif len(kn) == 1 and not tname.startswith('N$'):
-            if norm_net(next(iter(kn))) != tname.replace('!', ''):
+            if len(pads) == 1 and next(iter(kn)).startswith('unconnected-'):
+                pass                         # a one-pin Eagle net: its label became a no-connect flag
+            elif norm_net(next(iter(kn))) != tname.replace('!', ''):
                 renamed += 1
                 ren.append((tname, next(iter(kn))))
     missing = sorted({pd for pd in t_of if pd not in k_of and pd[0] not in ignore_refs})
@@ -1507,6 +1509,223 @@ def add_no_connects(cli, root_sch, sheets, tmpdir, eagle_truth):
     R.p(f'{n} no-connect flags added (pins unconnected in Eagle as well)')
     if skipped:
         R.p('NOT flagged - connected in Eagle but open in KiCad (check!): ' + ', '.join(skipped))
+
+
+_FRAME_RX = re.compile(r'frame|dina\d|din_?a\d|letter|ledger|docfield|^a[0-4][lp]?[-_]|_a[0-4][lp]?$', re.I)
+
+
+def _sym_span(libsym):
+    xs, ys = [], []
+    def walk(n):
+        for x in n:
+            if isinstance(x, list) and x:
+                if x[0] in ('xy', 'start', 'end', 'at') and len(x) >= 3:
+                    try:
+                        xs.append(float(x[1])); ys.append(float(x[2]))
+                    except ValueError:
+                        pass
+                elif x[0] != 'property':
+                    walk(x)
+    walk(libsym)
+    return (max(xs) - min(xs), max(ys) - min(ys)) if xs else (0, 0)
+
+
+def fix_eagle_frames(sheets, keep=False):
+    """Eagle draws the sheet frame + title block as a pin-less FRAME symbol; KiCad has its own page
+    frame, so after the import every sheet shows two frames. The Eagle frame symbols are removed
+    (a pin-less symbol named like a frame, or one wider than 120 mm - logos stay)."""
+    R.h('SCH: Eagle drawing frames (KiCad draws its own page frame)')
+    if keep:
+        R.p('kept (--keep-eagle-frames)'); return
+    gone = []
+    for sh in sheets:
+        keep_nodes = []
+        for node in sh.tree:
+            if isinstance(node, list) and node and node[0] == 'symbol' and kid(node, 'lib_id'):
+                lid = str(kid(node, 'lib_id')[1])
+                ls = sh.libsyms.get(lid)
+                if ls is not None and not lib_pins(ls) and not is_power(ls):
+                    w, h = _sym_span(ls)
+                    if _FRAME_RX.search(lid.split(':')[-1]) or max(w, h) > 120:
+                        gone.append(f'{prop_val(node, "Reference", "?")} ({lid.split(":")[-1]})')
+                        continue
+            keep_nodes.append(node)
+        if len(keep_nodes) != len(sh.tree):
+            sh.tree[:] = keep_nodes; sh.dirty = True
+    R.p(f'{len(gone)} frame symbols removed' + (': ' + ', '.join(gone[:12]) + (' ...' if len(gone) > 12 else '') if gone else ''))
+
+
+_LBL = ('label', 'global_label', 'hierarchical_label')
+
+
+def _sheet_pins_fresh(sh):
+    pts = set()
+    for inst in sh.instances():
+        ls = sh.libsyms.get(str(kid(inst, 'lib_id')[1]))
+        if ls is None:
+            continue
+        u = kid(inst, 'unit'); unit = int(u[1]) if u else 1
+        for pn in _unit_pins(ls, unit):
+            for f in (inst_xform, _inst_xform2):
+                x, y = f(inst, pn['x'], pn['y'])
+                pts.add((round(x, 2), round(y, 2)))
+    for sht in kids(sh.tree, 'sheet'):                 # hierarchical sheet pins count as pins
+        for sp in kids(sht, 'pin'):
+            at = kid(sp, 'at')
+            if at: pts.add((round(float(at[1]), 2), round(float(at[2]), 2)))
+    for be in kids(sh.tree, 'bus_entry'):              # so do bus entries
+        at, sz = kid(be, 'at'), kid(be, 'size')
+        if at and sz:
+            pts.add((round(float(at[1]), 2), round(float(at[2]), 2)))
+            pts.add((round(float(at[1]) + float(sz[1]), 2), round(float(at[2]) + float(sz[2]), 2)))
+    return pts
+
+
+def _uuid_of(node):
+    u = kid(node, 'uuid')
+    return str(u[1]) if u else None
+
+
+def _wire_island(sh, seed_wire):
+    """All wires connected to seed_wire (shared end or an end on the other wire), the labels and
+    junctions on them, and the island's points."""
+    def ends(w):
+        xy = kids(kid(w, 'pts') or [], 'xy')
+        return [(round(float(p[1]), 2), round(float(p[2]), 2)) for p in xy[:2]]
+    wires = [w for w in kids(sh.tree, 'wire') if len(ends(w)) == 2]
+    def on(p, a, b, tol=0.011):
+        if min(a[0], b[0]) - tol <= p[0] <= max(a[0], b[0]) + tol and min(a[1], b[1]) - tol <= p[1] <= max(a[1], b[1]) + tol:
+            cr = (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
+            L = max(abs(b[0] - a[0]), abs(b[1] - a[1]), 1e-9)
+            return abs(cr) / L <= tol
+        return False
+    isl, todo = [seed_wire], [seed_wire]
+    while todo:
+        w = todo.pop(); a, b = ends(w)
+        for o in wires:
+            if any(o is x for x in isl):
+                continue
+            c, d = ends(o)
+            if on(c, a, b) or on(d, a, b) or on(a, c, d) or on(b, c, d):
+                isl.append(o); todo.append(o)
+    segs = [ends(w) for w in isl]
+    pts = {p for s in segs for p in s}
+    def touches(p):
+        return any(on(p, a, b) for a, b in segs)
+    labels = []
+    for head in _LBL:
+        for lb in kids(sh.tree, head):
+            at = kid(lb, 'at')
+            if at and touches((round(float(at[1]), 2), round(float(at[2]), 2))):
+                labels.append(lb)
+    juncs = [j for j in kids(sh.tree, 'junction') if kid(j, 'at') and
+             touches((round(float(kid(j, 'at')[1]), 2), round(float(kid(j, 'at')[2]), 2)))]
+    return isl, labels, juncs, segs, pts, touches
+
+
+def fix_unused_label_islands(cli, root_sch, sheets, tmpdir):
+    """Eagle leftovers ERC reports as 'unconnected wire endpoint' / 'Label connected to only one pin':
+      - a wire piece with a net label but no pin on it (an Eagle label that names nothing):
+        the wires and labels are removed;
+      - a label whose net reaches a single pin and nothing else: the label and its wire are removed
+        and the pin gets a no-connect flag (it is open in Eagle too - nothing else is on that net).
+    Every change is checked: the netlist (all nets with 2+ pins) must stay identical, else undone."""
+    R.h('SCH: unused Eagle labels / wire pieces without pins')
+    erc = erc_run(cli, root_sch, tmpdir) if cli else None
+    if erc is None:
+        R.p('no ERC - skipped'); return
+    want_w, want_l = set(), set()
+    for s_ in erc.get('sheets', []):
+        for v in s_.get('violations', []):
+            for it in v.get('items', []):
+                if v['type'] == 'unconnected_wire_endpoint' and it.get('uuid'):
+                    want_w.add(it['uuid'])
+                elif v['type'] in ('isolated_pin_label', 'label_single_pin', 'label_dangling') and it.get('uuid'):
+                    want_l.add((it['uuid'], v['type']))
+    if not want_w and not want_l:
+        R.p('none'); return
+    before, _ = kicad_sch_netlist(cli, root_sch, tmpdir)
+    plan = []                                           # (sheet, kind, wires, labels, juncs, pts, names)
+    done_ids = set()
+    for sh in sheets:
+        pins = _sheet_pins_fresh(sh)
+        by_uuid = {}
+        for node in sh.tree:
+            if isinstance(node, list) and node and node[0] in ('wire',) + _LBL:
+                u = _uuid_of(node)
+                if u: by_uuid[u] = node
+        seeds = [(u, 'wire') for u in want_w if u in by_uuid] + [(u, t) for u, t in want_l if u in by_uuid]
+        for u, kind in seeds:
+            node = by_uuid[u]
+            if id(node) in done_ids:
+                continue
+            if node[0] == 'wire':
+                seed = node
+            else:                                       # a label: the wire it sits on
+                at = kid(node, 'at'); p = (round(float(at[1]), 2), round(float(at[2]), 2))
+                seed = None
+                for w in kids(sh.tree, 'wire'):
+                    xy = kids(kid(w, 'pts') or [], 'xy')
+                    if len(xy) >= 2:
+                        a = (round(float(xy[0][1]), 2), round(float(xy[0][2]), 2)); b = (round(float(xy[1][1]), 2), round(float(xy[1][2]), 2))
+                        if min(a[0], b[0]) - .011 <= p[0] <= max(a[0], b[0]) + .011 and min(a[1], b[1]) - .011 <= p[1] <= max(a[1], b[1]) + .011 \
+                                and abs((b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])) <= .011 * max(abs(b[0] - a[0]), abs(b[1] - a[1]), 1e-9):
+                            seed = w; break
+            if seed is None:
+                if node[0] in _LBL and kind == 'label_dangling':     # a label on nothing at all
+                    plan.append((sh, 'label', [], [node], [], set(), {str(node[1])})); done_ids.add(id(node))
+                elif node[0] in _LBL and kind in ('isolated_pin_label', 'label_single_pin') and p in pins:
+                    plan.append((sh, 'single', [], [node], [], {p}, {str(node[1])})); done_ids.add(id(node))
+                continue
+            wires, labels, juncs, segs, pts, touches = _wire_island(sh, seed)
+            if any(id(x) in done_ids for x in wires):
+                continue
+            if any(lb[0] == 'hierarchical_label' for lb in labels):
+                continue                                # sheet interface: leave it
+            names = {str(lb[1]) for lb in labels}
+            npin = [p for p in pins if touches(p)]
+            if node[0] == 'wire' and not npin and len(names) <= 1:
+                kind_ = 'nopin'
+            elif node[0] in _LBL and len(npin) == 1 and len(names) == 1 and kind in ('isolated_pin_label', 'label_single_pin'):
+                kind_ = 'single'
+            else:
+                continue
+            plan.append((sh, kind_, wires, labels, juncs, set(npin), names))
+            done_ids.update(id(x) for x in wires + labels + juncs)
+    if not plan:
+        R.p(f'{len(want_w)} open wire ends / {len(want_l)} single-pin labels: none of them is an unused Eagle label piece'); return
+    removed = []
+    for sh, kind, wires, labels, juncs, npin, names in plan:
+        gone = {id(x) for x in wires + labels + juncs}
+        removed.append((sh, [x for x in sh.tree if id(x) in gone]))
+        sh.tree[:] = [x for x in sh.tree if id(x) not in gone]; sh.dirty = True
+    for sh in sheets: sh.save()
+    after, _ = kicad_sch_netlist(cli, root_sch, tmpdir)
+    if before is None or after is None or netlist_partition(before) != netlist_partition(after):
+        for sh, nodes in removed:
+            sh.tree.extend(nodes); sh.dirty = True
+        for sh in sheets: sh.save()
+        R.p(f'{len(plan)} unused label pieces found, but removing them changed the netlist -> left in place'); return
+    nc = 0
+    for sh, kind, wires, labels, juncs, npin, names in plan:
+        if kind == 'single':
+            for (x, y) in npin:
+                sh.tree.append(['no_connect', ['at', f'{x:g}', f'{y:g}'], ['uuid', new_uuid()]]); nc += 1
+            for lb in labels:                           # the name stays readable as a plain text note
+                at = kid(lb, 'at'); ang = int(float(at[3])) % 360 if len(at) > 3 else 0
+                rot, just = (0, 'left') if ang == 0 else (90, 'left') if ang == 90 else (0, 'right') if ang == 180 else (90, 'right')
+                sh.tree.append(['text', Q(str(lb[1])), ['exclude_from_sim', 'no'],
+                                ['at', str(at[1]), str(at[2]), str(rot)],
+                                ['effects', ['font', ['size', '1.27', '1.27']], ['justify', just]],
+                                ['uuid', new_uuid()]])
+            sh.dirty = True
+    for sh in sheets: sh.save()
+    single = sorted({n for _, k, _, _, _, _, ns in plan if k == 'single' for n in ns})
+    nopin = sorted({n for _, k, _, _, _, _, ns in plan if k in ('nopin', 'label') for n in ns})
+    n_np = sum(1 for p in plan if p[1] in ('nopin', 'label'))
+    R.p(f'{n_np} wire pieces without any pin removed (labels: {", ".join(nopin) if nopin else "none"}); netlist unchanged')
+    R.p(f'{len(single)} labels whose net reaches only one pin -> no-connect flag on the pin ({nc}), the name kept as a text note'
+        + (': ' + ', '.join(single[:30]) if single else ''))
 
 
 # --------------------------------------------------------------------------- PCB fixes
@@ -2824,6 +3043,159 @@ def assign_orphan_pads(pcb_path, dry):
     if done and not dry:
         pcbnew.SaveBoard(pcb_path, board)
 
+
+def fix_dangling_track_ends(cli, pcb_path, tmpdir, dry):
+    """DRC 'Track has unconnected end': Eagle connects by copper overlap. Typical leftovers are short
+    arcs / pieces of a bend lying entirely inside a via or pad, or a track ending beside the pad
+    centre. The copper is connected, KiCad's connectivity is not. For every reported track:
+      - it lies completely inside one via / pad of its net (its full width) -> removed: the via or
+        pad copper is already there, the Gerber does not change;
+      - an open end inside a pad / via of its net -> a straight piece to the pad / via centre
+        (same width, inside the copper);
+      - an open end within 0.05 mm of another track end / via of its net -> moved onto it.
+    Checked with a DRC before/after: no new unconnected item, short, width or clearance error,
+    else everything is undone. Ends in empty space are left for review."""
+    R.h('PCB: track ends that stop short of their pad / the next track')
+    try:
+        import pcbnew
+    except ImportError:
+        R.p('pcbnew module not available - skipped'); return
+    d0 = drc_run(cli, pcb_path, tmpdir, parity=False) if cli else None
+    if d0 is None:
+        R.p('no DRC - skipped'); return
+    ids = {it['uuid'] for v in d0.get('violations', []) if v['type'] == 'track_dangling'
+           for it in v.get('items', []) if it.get('uuid')}
+    if not ids:
+        R.p('none'); return
+    board = pcbnew.LoadBoard(pcb_path)
+    tracks = list(board.GetTracks())
+    vias = [t for t in tracks if t.Type() == pcbnew.PCB_VIA_T]
+    segs = [t for t in tracks if t.Type() != pcbnew.PCB_VIA_T]
+    pads = [p for fp in board.GetFootprints() for p in fp.Pads()]
+    by_id = {t.m_Uuid.AsString(): t for t in segs}
+    V = pcbnew.VECTOR2I
+    def dist(a, b):
+        return ((a.x - b.x) ** 2 + (a.y - b.y) ** 2) ** 0.5
+    def owners(t):
+        L, n = t.GetLayer(), t.GetNetCode()
+        return [o for o in vias if o.GetNetCode() == n] + [p for p in pads if p.GetNetCode() == n and p.IsOnLayer(L)]
+    def covered_by(t):
+        pts = [t.GetStart(), t.GetEnd()] + ([t.GetMid()] if t.Type() == pcbnew.PCB_ARC_T else [])
+        r = t.GetWidth() // 2
+        probe = [V(P.x + dx, P.y + dy) for P in pts for dx, dy in
+                 ((0, 0), (r, 0), (-r, 0), (0, r), (0, -r), (r * 7 // 10, r * 7 // 10), (-r * 7 // 10, r * 7 // 10),
+                  (r * 7 // 10, -r * 7 // 10), (-r * 7 // 10, -r * 7 // 10))]
+        for o in owners(t):
+            if all(o.HitTest(q, 0) for q in probe):
+                return o
+        return None
+    def end_owner(t, P):
+        for o in owners(t):
+            if o.HitTest(P, 0):
+                return o
+        return None
+    def end_free(t, P):
+        L, n = t.GetLayer(), t.GetNetCode()
+        return not any(o is not t and o.GetLayer() == L and o.GetNetCode() == n and
+                       (dist(o.GetStart(), P) <= 1000 or dist(o.GetEnd(), P) <= 1000) for o in segs)
+    def name(o):
+        if o.Type() == pcbnew.PCB_VIA_T:
+            return 'via'
+        return f'{o.GetParentFootprint().GetReference()}.{o.GetNumber()}'
+    removed, joined, snapped, left = [], [], [], []
+    act_rm, act_add, act_mv = set(), [], []          # applied to the board FILE below: an in-process
+                                                      # board edit breaks later pcbnew.LoadBoard calls
+    for u in ids:
+        t = by_id.get(u)
+        if t is None or t.GetNetCode() <= 0:
+            continue
+        o = covered_by(t)
+        if o is not None:
+            removed.append(f'{t.GetNetname()} in {name(o)}'); act_rm.add(u); segs[:] = [x for x in segs if x is not t]; continue
+        L, n = t.GetLayer(), t.GetNetCode()
+        fixed = False
+        for which in ('start', 'end'):
+            P = t.GetStart() if which == 'start' else t.GetEnd()
+            if not end_free(t, P):
+                continue
+            o = end_owner(t, P)
+            if o is not None:
+                c = o.GetPosition()
+                if c.x != P.x or c.y != P.y:
+                    act_add.append((u, P.x, P.y, c.x, c.y)); fixed = True
+                    joined.append(f'{t.GetNetname()} -> {name(o)}')
+                continue
+            best = None
+            for o2 in segs:
+                if o2 is not t and o2.GetLayer() == L and o2.GetNetCode() == n:
+                    for Q in (o2.GetStart(), o2.GetEnd()):
+                        if dist(Q, P) <= 50000 and (best is None or dist(Q, P) < best[0]):
+                            best = (dist(Q, P), Q)
+            if best:
+                act_mv.append((u, which, best[1].x, best[1].y)); fixed = True
+                snapped.append(f'{t.GetNetname()} ({best[0] / 1000:.1f} um)')
+        if not fixed:
+            P = t.GetStart()
+            left.append(f'{t.GetNetname()} {board.GetLayerName(L)} ({P.x / 1e6:.2f}, {P.y / 1e6:.2f}) mm')
+    if not (removed or joined or snapped):
+        R.p(f'{len(ids)} open track ends, none inside or next to a pad / via / track of their own net - left for review')
+        return
+    if dry:
+        R.p(f'dry run: {len(removed)} would be removed, {len(joined)} joined, {len(snapped)} snapped'); return
+    pro_path = os.path.splitext(pcb_path)[0] + '.kicad_pro'
+    baks = [(f, f + '.trackends.bak') for f in (pcb_path, pro_path) if os.path.isfile(f)]
+    for f, b in baks:
+        shutil.copy2(f, b)
+    del board
+    tree = read_sx(pcb_path)
+    mm = lambda v: f'{v / 1e6:.6f}'.rstrip('0').rstrip('.')
+    nodes = {}
+    for nd in tree:
+        if isinstance(nd, list) and nd and nd[0] in ('segment', 'arc'):
+            uu = kid(nd, 'uuid')
+            if uu: nodes[str(uu[1])] = nd
+    for u, which, x, y in act_mv:
+        nd = nodes.get(u)
+        if nd is not None:
+            k = kid(nd, which); k[1], k[2] = mm(x), mm(y)
+    for u, x1, y1, x2, y2 in act_add:
+        nd = nodes.get(u)
+        if nd is not None:
+            tree.append(['segment', ['start', mm(x1), mm(y1)], ['end', mm(x2), mm(y2)], list(kid(nd, 'width')),
+                         list(kid(nd, 'layer')), list(kid(nd, 'net')), ['uuid', new_uuid()]])
+    tree[:] = [nd for nd in tree if not (isinstance(nd, list) and nd and nd[0] in ('segment', 'arc')
+                                         and kid(nd, 'uuid') and str(kid(nd, 'uuid')[1]) in act_rm)]
+    write_sx(pcb_path, tree)
+    d1 = drc_run(cli, pcb_path, tmpdir, parity=False)
+    def bad(d):
+        c = Counter(v['type'] for v in d.get('violations', []))
+        c['unconnected_items'] = len(d.get('unconnected_items', []))
+        return c
+    worse = []
+    if d1 is None:
+        worse = ['DRC failed']
+    else:
+        b0, b1 = bad(d0), bad(d1)
+        for k in set(b1) | set(b0):
+            if k != 'track_dangling' and b1[k] > b0[k]:
+                worse.append(f'{k} {b0[k]}->{b1[k]}')
+    if worse:
+        for f, b in baks:
+            shutil.copy2(b, f); os.remove(b)
+        R.p(f'{len(removed) + len(joined) + len(snapped)} open track ends could be fixed, but the DRC got worse '
+            f'({", ".join(worse)}) -> undone'); return
+    for f, b in baks:
+        os.remove(b)
+    n1 = bad(d1)['track_dangling']
+    R.p(f'DRC "track has unconnected end": {len(ids)} -> {n1}; no new DRC error')
+    R.p(f'  {len(removed)} bend pieces lying completely inside a via / pad of their net removed (copper unchanged)')
+    if joined:
+        R.p(f'  {len(joined)} ends joined to the pad / via centre: ' + ', '.join(sorted(set(joined))[:20]))
+    if snapped:
+        R.p(f'  {len(snapped)} ends moved onto the next track end: ' + ', '.join(snapped[:20]))
+    if left:
+        R.p(f'  {len(left)} left for review (the end is in empty space - an Eagle stub, check in the PCB editor): '
+            + '; '.join(left[:15]) + (' ...' if len(left) > 15 else ''))
 
 def fix_pcb_sexpr(pcb_path, sch_refs, dry, ebrd=None):
     R.h('PCB: layers / board-only items')
@@ -4492,6 +4864,7 @@ def main():
     ap.add_argument('--kicad-cli')
     ap.add_argument('--no-pwr-flags', action='store_true')
     ap.add_argument('--no-label-globalize', action='store_true')
+    ap.add_argument('--keep-eagle-frames', action='store_true', help='keep the Eagle drawing frame symbols')
     ap.add_argument('--libfix', action='store_true',
                     help='library clean-up before the QC: unique R/L/C symbols, Value/MPN/supplier fields, '
                          'bidirectional pins (plugins/libfix)')
@@ -4687,6 +5060,7 @@ def main():
         fix_local_labels(sheets)
     fix_labels_on_bus(sheets)
     fix_dangling_wire_labels(sheets)
+    fix_eagle_frames(sheets, keep=a.keep_eagle_frames)
     fix_pinless(sheets)
     fix_nc_pins(d, sheets, eagle_sch_truth(esch) if esch else None, a.dry_run)
     if a.libfix:
@@ -4741,6 +5115,8 @@ def main():
         progress(33, 'No-connect flags')
         add_no_connects(cli, root_sch, sheets, tmpdir, eagle_sch_truth(esch) if esch else None)
         for s in sheets: s.save()
+        sheets = [Sheet(p) for p in sorted(glob.glob(os.path.join(d, '*.kicad_sch')))]
+        fix_unused_label_islands(cli, root_sch, sheets, tmpdir)
         if a.libfix:
             progress(34, 'Library clean-up')
             run_libfix(d)
@@ -4750,6 +5126,8 @@ def main():
             sheets = [Sheet(p) for p in sorted(glob.glob(os.path.join(d, '*.kicad_sch')))]
             progress(36, 'Net names and fields schematic -> PCB')
             sync_pcb_to_sch(cli, root_sch, pcb, pro, sheets, tmpdir, a.dry_run)
+            progress(37, 'Track ends that stop short of their pad')
+            fix_dangling_track_ends(cli, pcb, tmpdir, a.dry_run)
 
     if not a.dry_run:
         progress(39, 'Quality control: comparing the result with the Eagle source')
