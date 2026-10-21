@@ -2339,17 +2339,20 @@ def _fp_mask_shapes_to_pad_masks(fp, pcb_path=None):
         box = [(x - r, y - r), (x + r, y - r), (x + r, y + r), (x - r, y + r)]
         cu = {S for S in 'FB' if S + '.Cu' in lys or '*.Cu' in lys}
         mk = {S for S in 'FB' if S + '.Mask' in lys or '*.Mask' in lys}
-        pads.append((p, box, cu, mk))
+        pads.append((p, box, cu, mk, str(p[3]) == 'custom'))
     cover = [(k, S, [pd for pd in pads if S in pd[2] and _poly_touch(pts, pd[1])]) for k, S, pts in shapes]
-    if not any(S not in pd[3] for k, S, hit in cover for pd in hit):
-        return 0                         # every pad under the graphics already opens its own mask
+    # only the copper-polygon pads (custom pads made by _fp_copper_polys_to_pads) take their opening
+    # from the package graphics; a regular pad with stop="no" under an Eagle tStop shape has exactly
+    # that (smaller / other) opening on purpose - KiCad reproduces it with the graphics, keep them
+    if not any(S not in pd[3] and pd[4] for k, S, hit in cover for pd in hit):
+        return 0
     n = 0
     gone = []
     for k, S, hit in cover:
-        if not hit:
+        if not hit or any(S not in pd[3] and not pd[4] for pd in hit):
             continue
         gone.append(k); n += 1
-        for p, _, _, mk in hit:
+        for p, _, _, mk, _c in hit:
             if S not in mk:
                 ly = kid(p, 'layers'); ly.append(Q(S + '.Mask')); mk.add(S)
     if gone and asking() and pcb_path:
