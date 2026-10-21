@@ -285,6 +285,8 @@ class LogWindow(wx.Frame):
         if not self:
             return
         if pct is not None:
+            if int(pct) > self.pct:
+                self._pct_t = time.time()
             self.pct = max(self.pct, min(100, int(pct)))
         if label and label != self.stage.GetLabel():
             self.stage.SetLabel(label)
@@ -314,6 +316,9 @@ class LogWindow(wx.Frame):
         try:
             if el < 20 or self.pct < 5 or self.pct >= 100 or getattr(self, 'waiting', False):
                 return ''
+            if time.time() - getattr(self, '_pct_t', self.t0) > 180:
+                return ', this step takes long - check whether KiCad shows a question'
+
             finish = self.t0 + el * 100.0 / self.pct
             prev = getattr(self, '_finish_at', None)
             self._finish_at = finish if prev is None else 0.85 * prev + 0.15 * finish
@@ -514,6 +519,7 @@ class ImportJob:
         # file dialog, destination dialog, then (full GUI import only) the layer-mapping dialog;
         # the driver keeps confirming KiCad's info boxes until the whole run is over
         self.driver = DialogDriver([gui_src, self.target], log=self.log, layer_mapping=not self.cli_pcb)
+        self.driver.on_question = lambda t, x: wx.CallAfter(self._kicad_question, t, x)
         self.driver.start()
         wx.CallAfter(self._run_import)
 
@@ -731,6 +737,21 @@ class ImportJob:
         try:
             with open(os.path.join(self.target, 'eaglefix_console.log'), 'w', encoding='utf-8') as f:
                 f.write(self.win.txt.GetValue())
+        except Exception:
+            pass
+
+    def _kicad_question(self, title, text):
+        """KiCad shows a question of its own (e.g. 'Save changes to the open project?') and waits."""
+        try:
+            if title is None:
+                self.win.waiting = False
+                self.stage(None, getattr(self, '_stage_before_q', '') or 'Working...')
+                return
+            self._stage_before_q = self.win.stage.GetLabel()
+            self.win.waiting = True
+            short = (text or title or '').strip().replace('\n', ' ')
+            self.stage(None, f'KiCad is waiting for your answer: {short[:90]}')
+            self.win.RequestUserAttention()
         except Exception:
             pass
 

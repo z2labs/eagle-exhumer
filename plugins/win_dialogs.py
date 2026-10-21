@@ -272,6 +272,17 @@ def _children(h):
     U.EnumChildWindows(h, EnumProc(cb), 0)
     return out
 
+def _is_message_box(dlg):
+    """a message / question box (task dialog or classic box with text + buttons) - not a file dialog
+    that is still building its controls"""
+    if is_task_dialog(dlg):
+        return True
+    cls = {_cls(c) for c in _children(dlg)}
+    if cls & {'Edit', 'ComboBoxEx32', 'ComboBox', 'SHELLDLL_DefView', 'DirectUIHWND', 'SysTreeView32', 'ToolbarWindow32'}:
+        return False
+    return 'Button' in cls and 'Static' in cls
+
+
 def _name_edit(dlg):
     """The 'File name:' / 'Folder:' edit of a common item dialog."""
     kids = _children(dlg)
@@ -302,6 +313,9 @@ class DialogDriver(threading.Thread):
         self.done, self.last = [], None
         self.messages = []            # [(title, text, action)] every KiCad message box seen
         self.stop_flag = False
+        self.on_question = None       # callback(title, text) / (None, None): KiCad waits for the user
+        self.question = None          # hwnd of the KiCad question shown to the user right now
+        self.surfaced = set()
 
     def _minimize_new(self):
         if not self.minimize_frames:
@@ -386,13 +400,15 @@ class DialogDriver(threading.Thread):
             t0 = time.time(); handled = False
             while not self.stop_flag and time.time() - t0 < self.timeout:
                 for d in _dialogs(self.pid):
-                    if d in self.seen or not U.IsWindowEnabled(d):
+                    if d in self.seen or d in self.surfaced or not U.IsWindowEnabled(d):
                         continue
                     time.sleep(0.4)                      # let the dialog finish building
                     ed = _name_edit(d)
                     ok = U.GetDlgItem(d, 1)
                     if not ed or not ok:
-                        continue                         # some other message box: leave it to the user
+                        if not is_progress(d) and _is_message_box(d):
+                            self._other_box(d)           # a KiCad question (e.g. save the open project?)
+                        continue
                     self.seen.add(d)
                     if not self._enter(d, ed, ok, path):
                         self.seen.discard(d)                 # not accepted: try this dialog again
@@ -404,6 +420,7 @@ class DialogDriver(threading.Thread):
                     break
                 if handled:
                     break
+                self._question_gone()
                 if self.last and self._recover():
                     continue
                 self._minimize_new()
@@ -415,6 +432,41 @@ class DialogDriver(threading.Thread):
             self._layer_mapping()
         else:
             self._info_ok()                              # keep confirming KiCad info boxes until stopped
+
+    def _other_box(self, d, msg=None):
+        """A message box that is not one of our file dialogs. Known-harmless ones are confirmed; anything
+        else is a question only the user can answer (KiCad's 'Save changes to the open project?' before
+        the import, for example): it is brought to the front - never answered - and reported so the
+        progress window can say what KiCad is waiting for instead of counting up an estimate."""
+        if d in self.surfaced:
+            return
+        if msg is None:
+            msg = dialog_text(d) if is_task_dialog(d) else (_text(d) or dialog_text(d))
+            if benign_reason(msg):
+                self.handle_message(d); return
+        self.surfaced.add(d)
+        self.question = d
+        try:
+            U.ShowWindow(d, 9); U.BringWindowToTop(d); U.SetForegroundWindow(d)
+        except Exception:
+            pass
+        if not self.messages or self.messages[-1][1] != msg:
+            self.messages.append((_title(d), msg, 'asked the user'))
+        self.log(f'  [KiCad asks - waiting for your answer in its window] "{_title(d)}" {msg or "(text not readable)"}')
+        if self.on_question:
+            try:
+                self.on_question(_title(d), msg)
+            except Exception:
+                pass
+
+    def _question_gone(self):
+        if self.question and not U.IsWindow(self.question):
+            self.question = None
+            if self.on_question:
+                try:
+                    self.on_question(None, None)
+                except Exception:
+                    pass
 
     def _layer_mapping(self, timeout=600):
         """KiCad's 'Edit Mapping of Imported Layers' dialog: bring to front, Auto-Match, OK."""
@@ -438,6 +490,7 @@ class DialogDriver(threading.Thread):
                 self.log('  [layer mapping] auto-match + OK')
                 self._info_ok()
                 return
+            self._question_gone()
             self._minimize_new()
             time.sleep(0.2)
 
@@ -450,6 +503,7 @@ class DialogDriver(threading.Thread):
                 if d in self.seen or not U.IsWindowEnabled(d) or _name_edit(d) or is_progress(d):
                     continue
                 self.handle_message(d)
+            self._question_gone()
             self._minimize_new()
             time.sleep(0.3)
 
@@ -470,4 +524,4 @@ class DialogDriver(threading.Thread):
             self.log(f'  [KiCad message, {tag}] "{_title(d)}" {msg}')
         else:
             self.messages.append((_title(d), msg, 'left open'))
-            self.log(f'  [KiCad message, NOT confirmed] "{_title(d)}" {msg or "(text not readable)"}')
+            self._other_box(d, msg)                       # a question only the user can answer: to the front
