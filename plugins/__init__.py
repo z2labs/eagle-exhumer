@@ -21,7 +21,7 @@ import wx
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-VERSION = '0.9.19'
+VERSION = '0.9.20'
 # shown at the bottom of the plugin window; address written out against address harvesters
 SERVICES = ('Need a hand? Z2Labs takes on PCB conversion, RF hardware design and RF troubleshooting - '
             'hello [at] z2labs [dot] io')
@@ -57,6 +57,7 @@ def _python():
 
 from cli_pcb_import import cli_import_pcb
 import eagle_bin
+import review_dialog
 
 
 def _walk_menu(menu):
@@ -830,6 +831,55 @@ class ImportJob:
         wx.CallLater(200, lambda: (reopen(), wait(True)))
 
     def _finish(self, rc):
+        """Deletions the fixer only proposed: show them, apply the approved ones, then finish."""
+        props = review_dialog.load(self.target) if rc in (0, 1, 3) else []
+        if not props:
+            return self._finish_done(rc)
+        if review_dialog.test_mode():
+            self.log(f'test mode: {len(props)} deletion proposals left as they are')
+            return self._finish_done(rc)
+        try:
+            self.stage(None, 'Waiting for your decision: deletions')
+            self.win.waiting = True
+            dlg = review_dialog.ReviewDialog(self.win if self.win else None, props)
+            ok = dlg.ShowModal() == wx.ID_OK
+            ids = dlg.selected() if ok else []
+            dlg.Destroy()
+        except Exception as ex:
+            self.log(f'deletion review failed ({ex}) - nothing deleted')
+            ids = []
+        finally:
+            try:
+                self.win.waiting = False
+            except Exception:
+                pass
+        if not ids:
+            self.log(f'\nDeletions: none approved - all {len(props)} items kept (listed in {review_dialog.PROPOSALS_FILE})')
+            return self._finish_done(rc)
+        self.log(f'\n3) Deleting the {len(ids)} approved items (checked with DRC / ERC / netlist)...')
+        self.stage(None, 'Deleting the approved items')
+        cmd = [_python(), '-u', os.path.join(HERE, 'eagle2kicad_fix.py'), self.target,
+               '--apply-proposals', ','.join(ids)]
+        flags = 0x08000000 if os.name == 'nt' else 0
+
+        def run():
+            try:
+                pr = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8',
+                                      errors='replace', creationflags=flags, cwd=self.target)
+                for line in pr.stdout:
+                    line = line.rstrip()
+                    if not line or line.startswith('@@') or 'image handler' in line:
+                        continue
+                    wx.CallAfter(self.log, line)
+                r = pr.wait()
+                if r == 4:
+                    wx.CallAfter(self.log, 'The deletion made a check worse - nothing was changed.')
+            except Exception as ex:
+                wx.CallAfter(self.log, f'deletion failed: {ex}')
+            wx.CallAfter(self._finish_done, rc)
+        threading.Thread(target=run, daemon=True).start()
+
+    def _finish_done(self, rc):
         self._stop_driver()
         if rc in (0, 1, 3):                        # the project files were fixed (a FAIL / self-check
             try:                                   # verdict too): KiCad must not keep its old settings

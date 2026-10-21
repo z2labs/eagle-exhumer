@@ -284,6 +284,15 @@ class NamePlan:
         return self.names.get((base, value, footprint_leaf(footprint), partnr))
 
 
+NOT_FITTED_RX = re.compile(r'^\s*(n\.?\s*f\.?|n\.?\s*a\.?|dnp|dnf|not\s*fitted|no\s*pop)\s*(\(.*\))?\s*$', re.I)
+
+
+def is_not_fitted(value: str) -> bool:
+    """Eagle marks a not-fitted part by its Value: N.F., NF, NA, NA(2.2k), DNP, DNF ...
+    Such parts keep the general symbol and get KiCad's DNP flag instead of a per-value symbol."""
+    return bool(value) and bool(NOT_FITTED_RX.match(value))
+
+
 def multi_value_bases(sheets: List[str]) -> Dict[str, set]:
     """Project-library symbols used by BOM parts with more than one distinct ``Value``
     (``base -> {values}``). A library symbol can carry only one ``Value``, so such a
@@ -293,13 +302,15 @@ def multi_value_bases(sheets: List[str]) -> Dict[str, set]:
     for sheet in sheets:
         _, instances, _ = iter_instances(sheet)
         for inst in instances:
-            if inst.lib == LIB_NAME and inst.in_bom:
+            if inst.lib == LIB_NAME and inst.in_bom and not is_not_fitted(inst.value):
                 seen.setdefault(inst.base, set()).add(inst.value)
     return {b: v for b, v in seen.items() if len(v) > 1}
 
 
 def needs_unique(inst: Instance, multi: Dict[str, set]) -> bool:
     """R / L / C parts, and every part whose symbol is used with several values."""
+    if is_not_fitted(inst.value):
+        return False                     # N.F. / NA(...) parts: general symbol + DNP flag
     return is_rc_reference(inst.reference) or (inst.in_bom and inst.base in multi)
 
 

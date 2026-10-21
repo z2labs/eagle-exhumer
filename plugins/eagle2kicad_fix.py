@@ -126,6 +126,320 @@ def write_sx(path, node):
     with open(path, 'w', encoding='utf-8', newline='\n') as f:
         f.write(sx_dump(node) + '\n')
 
+# --------------------------------------------------------------------------- deletion proposals
+# Nothing the design contains is deleted without the user's OK: every step that would remove an
+# item (Eagle frame, wire stub, unused label piece, track / via, package mask shape) records a
+# PROPOSAL with a picture of the spot. The plugin shows them after the run; only the approved ones
+# are applied (--apply-proposals), DRC / ERC / netlist-guarded. Test runs (env EXHUMER_TEST=1 or the
+# marker file ~/.eagle_exhumer_test, or --deletions apply) apply them directly.
+
+def _test_mode():
+    return bool(os.environ.get('EXHUMER_TEST')) or os.path.isfile(os.path.join(os.path.expanduser('~'), '.eagle_exhumer_test'))
+
+DELETE_MODE = ['apply' if _test_mode() else 'ask']
+PROPOSALS = []
+PROPOSALS_FILE = 'eaglefix_proposals.json'
+
+
+def asking():
+    return DELETE_MODE[0] == 'ask'
+
+
+def propose(step, title, path, drop=(), add=(), pic=None, ledger=None, vias=None, note=''):
+    PROPOSALS.append({'id': f'd{len(PROPOSALS) + 1:03d}', 'step': step, 'title': title,
+                      'file': os.path.basename(path), 'drop': [str(u) for u in drop if u],
+                      'add': [n if isinstance(n, str) else sx_dump(n) for n in add],
+                      'ledger': dict(ledger or {}), 'vias': list(vias or []), 'note': note, 'pic': pic})
+
+
+def _pt(x, y):
+    return [round(float(x), 4), round(float(y), 4)]
+
+
+def _lib_geometry(sh, inst):
+    """symbol body lines / rectangles / circles / pins of one instance in sheet coordinates"""
+    out = []
+    ls = sh.libsyms.get(str(kid(inst, 'lib_id')[1])) if kid(inst, 'lib_id') else None
+    if ls is None:
+        return out
+    u = kid(inst, 'unit'); unit = int(u[1]) if u else 1
+    X = lambda x, y: _pt(*inst_xform(inst, float(x), float(y)))
+    subs = [s_ for s_ in kids(ls, 'symbol') if re.search(r'_(\d+)_(\d+)$', str(s_[1])) and
+            int(re.search(r'_(\d+)_(\d+)$', str(s_[1])).group(1)) in (0, unit)] or [ls]
+    for sub in subs:
+        for g in sub:
+            if not (isinstance(g, list) and g):
+                continue
+            if g[0] == 'polyline':
+                pts = [X(q[1], q[2]) for q in kids(kid(g, 'pts') or [], 'xy')]
+                if len(pts) >= 2: out.append({'t': 'line', 'pts': pts, 'w': 0.15, 'c': 'body'})
+            elif g[0] == 'rectangle':
+                a, b = kid(g, 'start'), kid(g, 'end')
+                if a and b:
+                    out.append({'t': 'poly', 'pts': [X(a[1], a[2]), X(b[1], a[2]), X(b[1], b[2]), X(a[1], b[2])], 'c': 'body'})
+            elif g[0] == 'circle':
+                c, r = kid(g, 'center'), kid(g, 'radius')
+                if c and r:
+                    q = X(c[1], c[2]); out.append({'t': 'circle', 'x': q[0], 'y': q[1], 'r': float(r[1]), 'c': 'body'})
+            elif g[0] == 'pin':
+                at, ln = kid(g, 'at'), kid(g, 'length')
+                if at:
+                    a_ = math.radians(float(at[3]) if len(at) > 3 else 0); L = float(ln[1]) if ln else 0
+                    x0, y0 = float(at[1]), float(at[2])
+                    out.append({'t': 'line', 'pts': [X(x0, y0), X(x0 + L * math.cos(a_), y0 + L * math.sin(a_))], 'w': 0.15, 'c': 'pin'})
+    return out
+
+
+def _sch_node_shapes(sh, node, c):
+    """drawing of one schematic item (wire, label, junction, no-connect, text, symbol)"""
+    h = node[0] if isinstance(node, list) and node else ''
+    if h in ('wire', 'bus'):
+        pts = [_pt(q[1], q[2]) for q in kids(kid(node, 'pts') or [], 'xy')]
+        return [{'t': 'line', 'pts': pts, 'w': 0.25, 'c': c}]
+    at = kid(node, 'at') if isinstance(node, list) else None
+    if h in ('junction',) and at:
+        return [{'t': 'circle', 'x': float(at[1]), 'y': float(at[2]), 'r': 0.5, 'c': c, 'fill': 1}]
+    if h == 'no_connect' and at:
+        x, y = float(at[1]), float(at[2]); e = 0.6
+        return [{'t': 'line', 'pts': [[x - e, y - e], [x + e, y + e]], 'w': 0.2, 'c': c},
+                {'t': 'line', 'pts': [[x - e, y + e], [x + e, y - e]], 'w': 0.2, 'c': c}]
+    if h in _LBL_ALL + ('text',) and at:
+        ang = float(at[3]) if len(at) > 3 else 0
+        return [{'t': 'text', 'x': float(at[1]), 'y': float(at[2]), 's': str(node[1]), 'a': ang, 'c': c, 'k': h}]
+    if h == 'symbol':
+        out = [dict(g, c=c if c != 'ctx' else g['c']) for g in _lib_geometry(sh, node)]
+        if at:
+            out.append({'t': 'text', 'x': float(at[1]), 'y': float(at[2]), 's': prop_val(node, 'Reference', ''),
+                        'a': 0, 'c': c if c != 'ctx' else 'ref', 'k': 'ref'})
+        return out
+    return []
+
+
+_LBL_ALL = ('label', 'global_label', 'hierarchical_label')
+
+
+def _shapes_box(shapes):
+    xs, ys = [], []
+    for g in shapes:
+        if g['t'] in ('line', 'poly'):
+            xs += [q[0] for q in g['pts']]; ys += [q[1] for q in g['pts']]
+        else:
+            xs.append(g['x']); ys.append(g['y'])
+    return (min(xs), min(ys), max(xs), max(ys)) if xs else (0, 0, 10, 10)
+
+
+def sch_pic(sh, dels, adds=(), margin=6.0, box=None):
+    """picture of a schematic proposal: the items to delete (del), to add (add) and everything
+    around them (ctx), in sheet mm"""
+    hl = [g for n in dels for g in _sch_node_shapes(sh, n, 'del')] + [g for n in adds for g in _sch_node_shapes(sh, n, 'add')]
+    x0, y0, x1, y1 = box or _shapes_box(hl)
+    side = max(x1 - x0, y1 - y0) / 2 + margin
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    B = [cx - side, cy - side, cx + side, cy + side]
+    inb = lambda x, y: B[0] - 5 <= x <= B[2] + 5 and B[1] - 5 <= y <= B[3] + 5
+    ids = {id(n) for n in dels}
+    ctx = []
+    for n in sh.tree:
+        if not (isinstance(n, list) and n) or id(n) in ids:
+            continue
+        if n[0] in ('wire', 'bus', 'junction', 'no_connect', 'text') + _LBL_ALL:
+            gs = _sch_node_shapes(sh, n, 'ctx')
+            if any(inb(*q) for g in gs for q in (g['pts'] if 'pts' in g else [(g['x'], g['y'])])):
+                ctx += gs
+        elif n[0] == 'symbol':
+            at = kid(n, 'at')
+            if at and inb(float(at[1]), float(at[2])):
+                ctx += _sch_node_shapes(sh, n, 'ctx')
+    return {'kind': 'sch', 'sheet': os.path.basename(sh.path), 'box': [round(v, 3) for v in B], 'ctx': ctx, 'hl': hl}
+
+
+def pcb_pic(board, uuids, margin=1.2, extra=None):
+    """picture of a PCB proposal from a pcbnew board: pads, tracks, vias around the items with the
+    given uuids (drawn as 'del'); extra = more highlight shapes"""
+    import pcbnew
+    mm = lambda v: round(v / 1e6, 4)
+    def geo(t, c):
+        if t.Type() == pcbnew.PCB_VIA_T:
+            return [{'t': 'circle', 'x': mm(t.GetPosition().x), 'y': mm(t.GetPosition().y),
+                     'r': mm(t.GetWidth(pcbnew.F_Cu)) / 2, 'd': mm(t.GetDrillValue()) / 2, 'c': c, 'fill': 1}]
+        pts = [t.GetStart(), t.GetMid(), t.GetEnd()] if t.Type() == pcbnew.PCB_ARC_T else [t.GetStart(), t.GetEnd()]
+        return [{'t': 'line', 'pts': [[mm(q.x), mm(q.y)] for q in pts], 'w': mm(t.GetWidth()),
+                 'c': c if c != 'ctx' else board.GetLayerName(t.GetLayer())}]
+    want = set(uuids)
+    hl = []
+    for t in board.GetTracks():
+        if t.m_Uuid.AsString() in want:
+            hl += geo(t, 'del')
+    hl += list(extra or [])
+    x0, y0, x1, y1 = _shapes_box(hl)
+    side = max(x1 - x0, y1 - y0, 0.6) / 2 + margin
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    B = [cx - side, cy - side, cx + side, cy + side]
+    inb = lambda x, y: B[0] - 1 <= x <= B[2] + 1 and B[1] - 1 <= y <= B[3] + 1
+    ctx = []
+    cu = [L for L in (pcbnew.B_Cu,) + tuple(range(pcbnew.In1_Cu, pcbnew.In30_Cu + 1)) + (pcbnew.F_Cu,)
+          if board.IsLayerEnabled(L)] if hasattr(pcbnew, 'In30_Cu') else [pcbnew.B_Cu, pcbnew.F_Cu]
+    for f in board.GetFootprints():
+        for pd in f.Pads():
+            P = pd.GetPosition()
+            if not inb(mm(P.x), mm(P.y)):
+                bb = pd.GetBoundingBox()
+                if not (mm(bb.GetLeft()) <= B[2] and mm(bb.GetRight()) >= B[0] and mm(bb.GetTop()) <= B[3] and mm(bb.GetBottom()) >= B[1]):
+                    continue
+            for L in (pcbnew.B_Cu, pcbnew.F_Cu):
+                if not pd.IsOnLayer(L):
+                    continue
+                try:
+                    sp = pd.GetEffectivePolygon(L, pcbnew.ERROR_INSIDE)
+                except TypeError:
+                    sp = pd.GetEffectivePolygon(pcbnew.ERROR_INSIDE)
+                for i in range(sp.OutlineCount()):
+                    o = sp.Outline(i)
+                    ctx.append({'t': 'poly', 'pts': [[mm(o.CPoint(j).x), mm(o.CPoint(j).y)] for j in range(o.PointCount())],
+                                'c': board.GetLayerName(L)})
+            if pd.GetNumber():
+                ctx.append({'t': 'text', 'x': mm(P.x), 'y': mm(P.y), 's': f'{f.GetReference()}.{pd.GetNumber()}', 'a': 0,
+                            'c': 'ref', 'k': 'pad'})
+    for t in board.GetTracks():
+        if t.m_Uuid.AsString() in want:
+            continue
+        g = geo(t, 'ctx')
+        if any(inb(*q) for gg in g for q in (gg['pts'] if 'pts' in gg else [(gg['x'], gg['y'])])):
+            ctx += g
+    for dr in board.GetDrawings():
+        if dr.GetLayer() == pcbnew.Edge_Cuts and dr.GetShape() == pcbnew.SHAPE_T_SEGMENT:
+            a, b = dr.GetStart(), dr.GetEnd()
+            if inb(mm(a.x), mm(a.y)) or inb(mm(b.x), mm(b.y)):
+                ctx.append({'t': 'line', 'pts': [[mm(a.x), mm(a.y)], [mm(b.x), mm(b.y)]], 'w': 0.1, 'c': 'Edge.Cuts'})
+    return {'kind': 'pcb', 'box': [round(v, 3) for v in B], 'ctx': ctx, 'hl': hl}
+
+
+def save_proposals(d):
+    f = os.path.join(d, PROPOSALS_FILE)
+    if PROPOSALS:
+        _save_json({'version': 1, 'proposals': PROPOSALS}, f)
+        R.h('Deletions waiting for your approval')
+        by = Counter(p['step'] for p in PROPOSALS)
+        R.p(f'{len(PROPOSALS)} items would be deleted - nothing was deleted. The plugin shows each with a '
+            'picture; or apply from the command line: `eagle2kicad_fix.py <project> --apply-proposals all|d001,d002`')
+        for k, v in by.items():
+            R.p(f'  {v} x {k}')
+    elif os.path.isfile(f):
+        os.remove(f)
+
+
+def _drop_uuids(tree, uuids):
+    """remove every node (any depth) whose (uuid ...) is in uuids; returns the count"""
+    n = 0
+    keep = []
+    for x in tree:
+        if isinstance(x, list) and x:
+            u = kid(x, 'uuid')
+            if u is not None and str(u[1]) in uuids and x[0] != 'uuid':
+                n += 1; continue
+            n += _drop_uuids(x, uuids)
+        keep.append(x)
+    tree[:] = keep
+    return n
+
+
+def apply_proposals(d, proj, cli, sel_ids, tmpdir):
+    """--apply-proposals: delete the approved items, guarded by DRC / ERC / netlist; all or nothing"""
+    f = os.path.join(d, PROPOSALS_FILE)
+    if not os.path.isfile(f):
+        print('no proposals'); return 0
+    allp = json.load(open(f, encoding='utf-8')).get('proposals', [])
+    sel = [p for p in allp if sel_ids == 'all' or p['id'] in sel_ids]
+    if not sel:
+        print('nothing selected'); return 0
+    files = sorted({p['file'] for p in sel})
+    paths = [os.path.join(d, x) for x in files]
+    pcb = os.path.join(d, proj + '.kicad_pcb'); pro = os.path.join(d, proj + '.kicad_pro')
+    root_sch = os.path.join(d, proj + '.kicad_sch')
+    has_pcb = any(x.endswith('.kicad_pcb') for x in files)
+    has_sch = any(x.endswith('.kicad_sch') for x in files)
+    baks = [(x, x + '.apply.bak') for x in paths + ([pro] if has_pcb else []) if os.path.isfile(x)]
+    for x, b in baks:
+        shutil.copy2(x, b)
+    progress(10, 'Checking before the deletion')
+    d0 = drc_run(cli, pcb, tmpdir, parity=False) if (has_pcb and cli) else None
+    n0 = kicad_sch_netlist(cli, root_sch, tmpdir)[0] if (has_sch and cli) else None
+    e0 = erc_run(cli, root_sch, tmpdir) if (has_sch and cli) else None
+    progress(40, 'Deleting the approved items')
+    nd = 0
+    for x in files:
+        path = os.path.join(d, x)
+        tree = read_sx(path)
+        uu = {u for p in sel if p['file'] == x for u in p['drop']}
+        nd += _drop_uuids(tree, uu)
+        for p in sel:
+            if p['file'] == x:
+                for a_ in p['add']:
+                    tree.append(sx_parse(a_))
+        write_sx(path, tree)
+    progress(55, 'Checking after the deletion')
+    worse = []
+    def cnt(dd):
+        c = Counter(v['type'] for v in dd.get('violations', []))
+        c['unconnected_items'] = len(dd.get('unconnected_items', []))
+        return c
+    if d0 is not None:
+        d1 = drc_run(cli, pcb, tmpdir, parity=False)
+        if d1 is None:
+            worse.append('DRC failed')
+        else:
+            b0, b1 = cnt(d0), cnt(d1)
+            for k in ('unconnected_items', 'shorting_items', 'clearance', 'hole_clearance', 'track_width',
+                      'copper_edge_clearance', 'connection_width', 'items_not_allowed'):
+                if b1[k] > b0[k]:
+                    worse.append(f'DRC {k} {b0[k]} -> {b1[k]}')
+    if n0 is not None:
+        n1 = kicad_sch_netlist(cli, root_sch, tmpdir)[0]
+        if n1 is None or netlist_partition(n0) != netlist_partition(n1):
+            worse.append('the schematic netlist changed')
+    if worse:
+        for x, b in baks:
+            shutil.copy2(b, x); os.remove(b)
+        msg = 'NOT applied - ' + '; '.join(worse) + ' (everything restored)'
+        print(msg); _report_append(d, [f'Approved deletions ({len(sel)}): {msg}'])
+        return 4
+    for x, b in baks:
+        os.remove(b)
+    led = Counter(); vias = []
+    for p in sel:
+        led.update(p.get('ledger') or {}); vias += p.get('vias') or []
+    if led:
+        lf = os.path.join(d, 'eaglefix_track_edits.json')
+        old_ = json.load(open(lf, encoding='utf-8')) if os.path.isfile(lf) else {}
+        for k_, v_ in led.items():
+            old_[k_] = old_.get(k_, 0) + v_
+        _save_json(old_, lf)
+    if vias:
+        vf = os.path.join(d, 'eaglefix_removed_vias.json')
+        old_ = json.load(open(vf, encoding='utf-8')) if os.path.isfile(vf) else []
+        _save_json(old_ + vias, vf)
+    rest = [p for p in allp if p not in sel]
+    if rest:
+        _save_json({'version': 1, 'proposals': rest}, f)
+    else:
+        os.remove(f)
+    by = Counter(p['step'] for p in sel)
+    lines = [f'Approved deletions applied ({len(sel)} items, {nd} file entries removed); DRC / netlist unchanged:'] + \
+            [f'  {v} x {k}' for k, v in by.items()] + ([f'{len(rest)} proposals left unapproved'] if rest else [])
+    for l in lines: print(l)
+    _report_append(d, lines)
+    progress(100, 'Done')
+    return 0
+
+
+def _report_append(d, lines):
+    try:
+        with open(os.path.join(d, 'eaglefix_report.md'), 'a', encoding='utf-8') as fh:
+            fh.write('\n## Deletions approved by the user\n\n' + ''.join(f'- {l}\n' for l in lines))
+    except OSError:
+        pass
+
+
 # --------------------------------------------------------------------------- reporting
 
 class Report:
@@ -1468,10 +1782,19 @@ def fix_stub_wires(cli, root_sch, sheets, tmpdir, max_len=1.3):
     if before is not None and netlist_partition(before) != netlist_partition(after):
         for sh in sheets:              # connectivity changed -> put them back
             sh.tree.extend(n for s2, n in removed if s2 is sh); sh.dirty = True; sh.save()
-        R.p(f'{len(removed)} stubs found, but removing them changed the netlist -> left in place')
-    else:
-        R.p(f'{len(removed)} dangling wire stubs (< {max_len} mm) removed, netlist unchanged'
-            + (f'; {len(dang) - len(removed)} other dangling ends left for review' if len(dang) > len(removed) else ''))
+        R.p(f'{len(removed)} short dangling wire stubs found, removing them would change the netlist -> left in place')
+        return
+    if asking():                       # checked - but only proposed: put them back
+        for sh in sheets:
+            if any(s2 is sh for s2, _ in removed):
+                sh.tree.extend(n for s2, n in removed if s2 is sh); sh.dirty = True; sh.save()
+        for sh, node in removed:
+            propose('Short dangling wire stubs', f'wire stub {wire_len(node):.2f} mm on sheet {os.path.basename(sh.path)}',
+                    sh.path, drop=[_uuid_of(node)], pic=sch_pic(sh, [node]))
+        R.p(f'{len(removed)} dangling wire stubs (< {max_len} mm, netlist unchanged without them) proposed for deletion')
+        return
+    R.p(f'{len(removed)} dangling wire stubs (< {max_len} mm) removed, netlist unchanged'
+        + (f'; {len(dang) - len(removed)} other dangling ends left for review' if len(dang) > len(removed) else ''))
 
 
 def add_no_connects(cli, root_sch, sheets, tmpdir, eagle_truth):
@@ -1548,11 +1871,17 @@ def fix_eagle_frames(sheets, keep=False):
                     w, h = _sym_span(ls)
                     if _FRAME_RX.search(lid.split(':')[-1]) or max(w, h) > 120:
                         gone.append(f'{prop_val(node, "Reference", "?")} ({lid.split(":")[-1]})')
-                        continue
+                        if asking():
+                            propose('Eagle drawing frames (KiCad draws its own)',
+                                    f'Eagle frame {gone[-1]} on sheet {os.path.basename(sh.path)}', sh.path,
+                                    drop=[_uuid_of(node)], pic=sch_pic(sh, [node], margin=8))
+                        else:
+                            continue
             keep_nodes.append(node)
         if len(keep_nodes) != len(sh.tree):
             sh.tree[:] = keep_nodes; sh.dirty = True
-    R.p(f'{len(gone)} frame symbols removed' + (': ' + ', '.join(gone[:12]) + (' ...' if len(gone) > 12 else '') if gone else ''))
+    R.p(f'{len(gone)} frame symbols ' + ('proposed for deletion (waiting for your OK)' if asking() else 'removed')
+        + (': ' + ', '.join(gone[:12]) + (' ...' if len(gone) > 12 else '') if gone else ''))
 
 
 _LBL = ('label', 'global_label', 'hierarchical_label')
@@ -1675,6 +2004,53 @@ def _dead_end_chain(sh, w0, pins):
         w, F = nxt[0], G
 
 
+NOT_FITTED_REFS = set()
+_NOT_FITTED_RX = re.compile(r'^\s*(n\.?\s*f\.?|n\.?\s*a\.?|dnp|dnf|not\s*fitted|no\s*pop)\s*(\(.*\))?\s*$', re.I)
+
+
+def mark_not_fitted(sheets):
+    """Eagle has no 'do not populate' flag: designers write it into the Value (N.F., NF, NA, NA(2k2),
+    DNP, DNF). KiCad has one - set it on the symbol (BOM / position files / 3D honour it) and keep the
+    Value text as Eagle had it. The PCB footprint gets the same flag in mark_not_fitted_pcb()."""
+    R.h('Schematic: not-fitted parts (Value N.F. / NA / DNP) -> KiCad DNP flag')
+    n = 0
+    for sh in sheets:
+        for inst in sh.instances():
+            v = prop_val(inst, 'Value', '')
+            ref = prop_val(inst, 'Reference', '')
+            if not v or ref.startswith('#') or not _NOT_FITTED_RX.match(v):
+                continue
+            NOT_FITTED_REFS.add(ref)
+            d = kid(inst, 'dnp')
+            if d is None:
+                at = next((i for i, x in enumerate(inst) if isinstance(x, list) and x and x[0] == 'on_board'), None)
+                inst.insert(at + 1 if at is not None else len(inst), ['dnp', 'yes'])
+            elif str(d[1]) != 'yes':
+                d[1] = 'yes'
+            else:
+                continue
+            sh.dirty = True; n += 1
+    R.p(f'{n} symbols marked DNP ({len(NOT_FITTED_REFS)} references: '
+        + ', '.join(sorted(NOT_FITTED_REFS)[:12]) + (' ...' if len(NOT_FITTED_REFS) > 12 else '') + ')')
+
+
+def mark_not_fitted_pcb(pcb_path, dry):
+    if not NOT_FITTED_REFS:
+        return
+    tree = read_sx(pcb_path); n = 0
+    for fp in kids(tree, 'footprint'):
+        if prop_val(fp, 'Reference', '') not in NOT_FITTED_REFS:
+            continue
+        attr = kid(fp, 'attr')
+        if attr is None:
+            attr = ['attr']; fp.insert(4, attr)
+        if 'dnp' not in attr:
+            attr.append('dnp'); n += 1
+    R.p(f'{n} PCB footprints marked DNP (same references)')
+    if n and not dry:
+        write_sx(pcb_path, tree)
+
+
 def fix_unused_label_islands(cli, root_sch, sheets, tmpdir):
     """Eagle leftovers ERC reports as 'unconnected wire endpoint' / 'Label connected to only one pin':
       - a wire piece with a net label but no pin on it (an Eagle label that names nothing):
@@ -1773,7 +2149,8 @@ def fix_unused_label_islands(cli, root_sch, sheets, tmpdir):
         for v in s_.get('violations', []):
             if v['type'] == 'pin_not_connected' and v.get('items') and 'pos' in v['items'][0]:
                 open_pins.append(v['items'][0]['pos'])
-    for sh, kind, wires, labels, juncs, npin, names in plan:
+    added = defaultdict(list)
+    for pi, (sh, kind, wires, labels, juncs, npin, names) in enumerate(plan):
         if kind == 'single':
             near = set()
             for w in wires:
@@ -1787,16 +2164,37 @@ def fix_unused_label_islands(cli, root_sch, sheets, tmpdir):
                 x, y = erc_xy(pos, sh)
                 if any(abs(x - a) <= 0.02 and abs(y - b) <= 0.02 for a, b in near) and \
                         (round(x, 2), round(y, 2)) in cand:
-                    sh.tree.append(['no_connect', ['at', f'{x:g}', f'{y:g}'], ['uuid', new_uuid()]]); nc += 1
+                    nn_ = ['no_connect', ['at', f'{x:g}', f'{y:g}'], ['uuid', new_uuid()]]
+                    sh.tree.append(nn_); added[pi].append(nn_); nc += 1
             for lb in labels:                           # the name stays readable as a plain text note
                 at = kid(lb, 'at'); ang = int(float(at[3])) % 360 if len(at) > 3 else 0
                 rot, just = (0, 'left') if ang == 0 else (90, 'left') if ang == 90 else (0, 'right') if ang == 180 else (90, 'right')
-                sh.tree.append(['text', Q(str(lb[1])), ['exclude_from_sim', 'no'],
-                                ['at', str(at[1]), str(at[2]), str(rot)],
-                                ['effects', ['font', ['size', '1.27', '1.27']], ['justify', just]],
-                                ['uuid', new_uuid()]])
+                nn_ = ['text', Q(str(lb[1])), ['exclude_from_sim', 'no'],
+                       ['at', str(at[1]), str(at[2]), str(rot)],
+                       ['effects', ['font', ['size', '1.27', '1.27']], ['justify', just]],
+                       ['uuid', new_uuid()]]
+                sh.tree.append(nn_); added[pi].append(nn_)
             sh.dirty = True
     for sh in sheets: sh.save()
+    if asking():                       # checked (netlist identical) - only proposed: undo, record
+        for sh, nodes in removed:
+            sh.tree.extend(nodes); sh.dirty = True
+        ids_add = {id(x) for v in added.values() for x in v}
+        for sh in sheets:
+            if any(id(x) in ids_add for x in sh.tree):
+                sh.tree[:] = [x for x in sh.tree if id(x) not in ids_add]; sh.dirty = True
+        for sh in sheets: sh.save()
+        what = {'deadend': 'wire branch ending in free space (no pin, no label on it)',
+                'nopin': 'wire piece with a label but no pin', 'label': 'label on nothing',
+                'single': 'label whose net reaches only one pin (pin gets a no-connect, the name stays as text)'}
+        for pi, (sh, kind, wires, labels, juncs, npin, names) in enumerate(plan):
+            dels = wires + labels + juncs
+            propose('Unused Eagle labels / wire pieces',
+                    f'{what.get(kind, kind)}' + (f': {", ".join(sorted(names))}' if names else '') +
+                    f' - sheet {os.path.basename(sh.path)}', sh.path,
+                    drop=[_uuid_of(x) for x in dels], add=added.get(pi, []), pic=sch_pic(sh, dels, added.get(pi, [])))
+        R.p(f'{len(plan)} unused Eagle label / wire pieces proposed for deletion (netlist unchanged without them)')
+        return
     single = sorted({n for _, k, _, _, _, _, ns in plan if k == 'single' for n in ns})
     nopin = sorted({n for _, k, _, _, _, _, ns in plan if k in ('nopin', 'label') for n in ns})
     n_np = sum(1 for p in plan if p[1] in ('nopin', 'label'))
@@ -1838,6 +2236,135 @@ def _poly_touch(P, Q):
             if _seg_x(P[i - 1], P[i], Q[j - 1], Q[j]):
                 return True
     return False
+
+
+def _fp_abs(fp):
+    """footprint-local -> board coordinates (KiCad: y down, angle counter-clockwise on screen)"""
+    at = kid(fp, 'at'); X, Y = float(at[1]), float(at[2]); A = math.radians(float(at[3]) if len(at) > 3 else 0)
+    c, s_ = math.cos(A), math.sin(A)
+    return lambda x, y: [round(X + x * c + y * s_, 4), round(Y - x * s_ + y * c, 4)]
+
+
+def _fp_pic(fp, del_shapes):
+    """picture of a footprint proposal from the s-expression: pads (approximate outline) + the shapes"""
+    T = _fp_abs(fp)
+    fa = kid(fp, 'at'); fang = float(fa[3]) if len(fa) > 3 else 0.0
+    side = 'B' if str((kid(fp, 'layer') or ['', 'F.Cu'])[1]).startswith('B') else 'F'
+    ctx, hl = [], []
+    for p in kids(fp, 'pad'):
+        pa, sz = kid(p, 'at'), kid(p, 'size')
+        if pa is None or sz is None:
+            continue
+        px, py = float(pa[1]), float(pa[2]); a_ = math.radians((float(pa[3]) if len(pa) > 3 else 0) - fang)
+        lys = [str(x) for x in (kid(p, 'layers') or [])[1:]]
+        lay = (side + '.Cu') if any(side + '.Cu' == l or l == '*.Cu' for l in lys) else ('B.Cu' if 'B.Cu' in lys else 'F.Cu')
+        def rot(x, y):
+            return T(px + x * math.cos(a_) + y * math.sin(a_), py - x * math.sin(a_) + y * math.cos(a_))
+        prim = kid(p, 'primitives')
+        polys = [[rot(float(q[1]), float(q[2])) for q in kids(kid(g, 'pts') or [], 'xy')] for g in (prim or [])[1:]
+                 if isinstance(g, list) and g and g[0] == 'gr_poly']
+        w, h = float(sz[1]) / 2, float(sz[2]) / 2
+        if str(p[3]) in ('circle',):
+            q = T(px, py); ctx.append({'t': 'circle', 'x': q[0], 'y': q[1], 'r': w, 'c': lay, 'fill': 1})
+        else:
+            polys.append([rot(-w, -h), rot(w, -h), rot(w, h), rot(-w, h)])
+        for pp in polys:
+            if len(pp) >= 3:
+                ctx.append({'t': 'poly', 'pts': pp, 'c': lay})
+        if str(p[1]):
+            q = T(px, py); ctx.append({'t': 'text', 'x': q[0], 'y': q[1], 's': str(p[1]), 'a': 0, 'c': 'ref', 'k': 'pad'})
+    for k in del_shapes:
+        if k[0] == 'fp_poly':
+            hl.append({'t': 'poly', 'pts': [T(float(q[1]), float(q[2])) for q in kids(kid(k, 'pts'), 'xy')], 'c': 'del'})
+        elif k[0] == 'fp_rect':
+            a, b = kid(k, 'start'), kid(k, 'end')
+            x0, y0, x1, y1 = float(a[1]), float(a[2]), float(b[1]), float(b[2])
+            hl.append({'t': 'poly', 'pts': [T(x0, y0), T(x1, y0), T(x1, y1), T(x0, y1)], 'c': 'del'})
+        elif k[0] == 'fp_circle':
+            c_, e = kid(k, 'center'), kid(k, 'end'); q = T(float(c_[1]), float(c_[2]))
+            hl.append({'t': 'circle', 'x': q[0], 'y': q[1], 'r': math.hypot(float(e[1]) - float(c_[1]), float(e[2]) - float(c_[2])),
+                       'c': 'del', 'fill': 1})
+    x0, y0, x1, y1 = _shapes_box(hl + ctx)
+    sd = max(x1 - x0, y1 - y0) / 2 + 0.8; cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    return {'kind': 'pcb', 'box': [round(cx - sd, 3), round(cy - sd, 3), round(cx + sd, 3), round(cy + sd, 3)], 'ctx': ctx, 'hl': hl}
+
+
+def _fp_mask_shapes_to_pad_masks(fp, pcb_path=None):
+    """Eagle idiom: tStop/bStop polygons in a package open the solder mask for copper polygons that
+    have no stop of their own (USB-C shell tabs). KiCad keeps them as footprint F.Mask/B.Mask graphics:
+    the opening is larger than the copper and also strips the mask from neighbouring tracks / GND
+    (solder_mask_bridge). Once the copper polygons are pads (_fp_copper_polys_to_pads), such a footprint
+    gets the mask from its pads: the mask graphics that overlap a pad are removed and every pad they
+    covered opens the mask itself (board / pad mask margin). Mask graphics that touch no pad (solder
+    jumper bridges, fiducial rings) and footprints whose pads all have their own opening stay as Eagle had them.
+    Returns the number of mask shapes removed."""
+    import math
+    side = {'F.Mask': 'F', 'B.Mask': 'B'}
+    shapes = []
+    for k in fp:
+        if not (isinstance(k, list) and k and k[0] in ('fp_poly', 'fp_rect', 'fp_circle')):
+            continue
+        ly = kid(k, 'layer')
+        if not ly or str(ly[1]) not in side:
+            continue
+        if k[0] == 'fp_poly':
+            pts = [(float(q[1]), float(q[2])) for q in kids(kid(k, 'pts'), 'xy')]
+        elif k[0] == 'fp_rect':
+            a, b = kid(k, 'start'), kid(k, 'end')
+            x0, y0, x1, y1 = float(a[1]), float(a[2]), float(b[1]), float(b[2])
+            pts = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+        else:
+            c, e = kid(k, 'center'), kid(k, 'end')
+            sw = kid(k, 'stroke'); w = float(kid(sw, 'width')[1]) if sw is not None and kid(sw, 'width') else 0
+            cx, cy = float(c[1]), float(c[2]); r = math.hypot(float(e[1]) - cx, float(e[2]) - cy) + w / 2
+            pts = [(cx - r, cy - r), (cx + r, cy - r), (cx + r, cy + r), (cx - r, cy + r)]
+        if len(pts) >= 3:
+            shapes.append((k, side[str(ly[1])], pts))
+    if not shapes:
+        return 0
+    pads = []
+    for p in kids(fp, 'pad'):
+        if str(p[2]) == 'np_thru_hole':
+            continue
+        lys = [str(x) for x in (kid(p, 'layers') or [])[1:]]
+        pa, sz = kid(p, 'at'), kid(p, 'size')
+        if pa is None or sz is None:
+            continue
+        r = math.hypot(float(sz[1]) / 2, float(sz[2]) / 2)
+        prim = kid(p, 'primitives')
+        for g in (prim or [])[1:]:
+            for q in kids(kid(g, 'pts') or [], 'xy'):
+                r = max(r, math.hypot(float(q[1]), float(q[2])))
+        x, y = float(pa[1]), float(pa[2])
+        box = [(x - r, y - r), (x + r, y - r), (x + r, y + r), (x - r, y + r)]
+        cu = {S for S in 'FB' if S + '.Cu' in lys or '*.Cu' in lys}
+        mk = {S for S in 'FB' if S + '.Mask' in lys or '*.Mask' in lys}
+        pads.append((p, box, cu, mk))
+    cover = [(k, S, [pd for pd in pads if S in pd[2] and _poly_touch(pts, pd[1])]) for k, S, pts in shapes]
+    if not any(S not in pd[3] for k, S, hit in cover for pd in hit):
+        return 0                         # every pad under the graphics already opens its own mask
+    n = 0
+    gone = []
+    for k, S, hit in cover:
+        if not hit:
+            continue
+        gone.append(k); n += 1
+        for p, _, _, mk in hit:
+            if S not in mk:
+                ly = kid(p, 'layers'); ly.append(Q(S + '.Mask')); mk.add(S)
+    if gone and asking() and pcb_path:
+        for k in gone:
+            if kid(k, 'uuid') is None:
+                k.append(['uuid', new_uuid()])
+        ref = prop_val(fp, 'Reference', '?')
+        propose('Package solder-mask shapes over pads (the pads open the mask themselves)',
+                f'{ref}: {len(gone)} Eagle stop-mask shapes ({", ".join(sorted({str(kid(k, "layer")[1]) for k in gone}))}) - '
+                'the opening becomes pad copper + mask margin', pcb_path,
+                drop=[str(kid(k, 'uuid')[1]) for k in gone], pic=_fp_pic(fp, gone))
+        return 0
+    for k in gone:
+        fp.remove(k)
+    return n
 
 
 def _fp_copper_polys_to_pads(fp):
@@ -2107,6 +2634,19 @@ def eagle_dru_rules(proj_dir, proj, brd, dry):
         v = g(k)
         if v is not None and abs(v - base) > 1e-4:
             body.append(f'(rule "eagle_{k}"\n  (condition "{cond}")\n  (constraint clearance (min {v:g}mm)))')
+    _, classes = eagle_brd_rules(brd)
+    names = {num: c.get('name') for num, c in classes.items()}
+    n_pair = 0
+    for num, c in classes.items():                     # Eagle class pairs (clearance matrix, off-diagonal)
+        for m, v in (c.get('clearance') or {}).items():
+            if m == num or not v or not c.get('name'):
+                continue
+            other = 'Default' if m == '0' or names.get(m) in (None, 'default') else names[m]
+            body.append(f'(rule "eagle_class_{num}_{m}"\n  (condition "A.NetClass == \'{c["name"]}\' && '
+                        f'B.NetClass == \'{other}\'")\n  (constraint clearance (min {v:g}mm)))')
+            n_pair += 1
+    if n_pair:
+        R.p(f'{n_pair} Eagle net class pair clearances (clearance matrix) written as custom rules')
     if g('mdWirePad') is not None and abs(g('mdWirePad') - base) > 1e-4:
         body.append(f'(rule "eagle_mdWireSmd"\n  (condition "A.Type == \'Track\' && B.Pad_Type == \'SMD\'")\n'
                     f'  (constraint clearance (min {g("mdWirePad"):g}mm)))')
@@ -2145,6 +2685,11 @@ def verify_geometry(pcb_path, ebrd):
         _TRACK_EDITS_FILE = json.load(open(f, encoding='utf-8')) if os.path.isfile(f) else {}
     except Exception:
         _TRACK_EDITS_FILE = {}
+    try:                                    # vias the dead-copper clean-up removed (connected on one layer only)
+        f = os.path.join(os.path.dirname(pcb_path), 'eaglefix_removed_vias.json')
+        removed_vias = json.load(open(f, encoding='utf-8')) if os.path.isfile(f) else []
+    except Exception:
+        removed_vias = []
     import math
     try:
         import pcbnew
@@ -2294,6 +2839,8 @@ def verify_geometry(pcb_path, ebrd):
             k_via[n][round(t.GetDrillValue() / 1e6, 3)] += 1
         else:
             k_len[n] += t.GetLength() / 1e6
+    for x_, y_, d_, n_ in removed_vias:
+        k_via[n_][round(d_, 3)] += 1
     for z in board.Zones():
         if not z.GetIsRuleArea():
             k_poly[z.GetNetname()] += z.GetLayerSet().count() if hasattr(z.GetLayerSet(), 'count') else 1
@@ -2547,6 +3094,8 @@ def verify_geometry(pcb_path, ebrd):
         if t.GetClass() == 'PCB_VIA':
             x, y = t.GetPosition().x / 1e6, t.GetPosition().y / 1e6
             k_holes[_cell(x, y)].append((x, y, t.GetDrillValue() / 1e6, True))
+    for x_, y_, d_, n_ in removed_vias:
+        k_holes[_cell(x_, y_)].append((x_, y_, d_, True))
     # plated slots made from Eagle's milled contours (plated_milling_slots): the pilot holes Eagle
     # drew inside the contour are drilled inside the KiCad slot - same opening, not a missing hole
     k_slots = []                                     # (ax, ay, bx, by, half width)
@@ -2791,6 +3340,111 @@ def _eagle_contour(pg, steps_per_rad=12):
                 t = a1 + a * k / n
                 out.append((cx + r * math.cos(t), cy + r * math.sin(t)))
     return out
+
+
+_RESTRICT = {'41': ('F.Cu', 'tRestrict'), '42': ('B.Cu', 'bRestrict')}
+
+
+def _thick_path(pts, h, round_caps=True, n_cap=8):
+    """outline of a polyline drawn with a pen of half width h (no self-overlap expected)"""
+    def nrm(a, b):
+        dx, dy = b[0] - a[0], b[1] - a[1]; L = math.hypot(dx, dy) or 1.0
+        return -dy / L, dx / L
+    left, right = [], []
+    for i, p in enumerate(pts):
+        if i == 0:
+            nx, ny = nrm(pts[0], pts[1])
+        elif i == len(pts) - 1:
+            nx, ny = nrm(pts[-2], pts[-1])
+        else:
+            n1, n2 = nrm(pts[i - 1], p), nrm(p, pts[i + 1])
+            nx, ny = (n1[0] + n2[0]) / 2, (n1[1] + n2[1]) / 2
+            L = math.hypot(nx, ny) or 1.0; nx, ny = nx / L, ny / L
+        left.append((p[0] + nx * h, p[1] + ny * h)); right.append((p[0] - nx * h, p[1] - ny * h))
+    def cap(c, a_start):                         # half circle from angle a_start, clockwise
+        return [(c[0] + h * math.cos(a_start - math.pi * k / n_cap), c[1] + h * math.sin(a_start - math.pi * k / n_cap))
+                for k in range(1, n_cap)]
+    out = list(left)
+    if round_caps:
+        nx, ny = nrm(pts[-2], pts[-1]); out += cap(pts[-1], math.atan2(ny, nx))
+    out += right[::-1]
+    if round_caps:
+        nx, ny = nrm(pts[0], pts[1]); out += cap(pts[0], math.atan2(ny, nx) + math.pi)
+    return out
+
+
+def _eagle_arc_pts(x1, y1, x2, y2, curve, seg_deg=10):
+    a = math.radians(curve)
+    c = math.hypot(x2 - x1, y2 - y1)
+    if abs(a) < 1e-9 or c == 0:
+        return [(x1, y1), (x2, y2)]
+    R = c / 2 / math.sin(abs(a) / 2)
+    mx, my = (x1 + x2) / 2, (y1 + y2) / 2
+    d = c / 2 / math.tan(abs(a) / 2)
+    ux, uy = (x2 - x1) / c, (y2 - y1) / c
+    sgn = 1 if a > 0 else -1                     # Eagle: positive curve = counter-clockwise (y up)
+    cx, cy = mx - sgn * uy * d, my + sgn * ux * d
+    a0 = math.atan2(y1 - cy, x1 - cx)
+    n = max(2, int(abs(curve) / seg_deg) + 1)
+    return [(cx + R * math.cos(a0 + a * k / n), cy + R * math.sin(a0 + a * k / n)) for k in range(n + 1)]
+
+
+def eagle_restrict_areas(pcb_path, ebrd, dry):
+    """Eagle tRestrict / bRestrict (layers 41 / 42) on the board keep the copper pour away - e.g. thick
+    restrict wires drawn along differential pairs (the ~0.53 mm pour gap of the USB pairs). KiCad's importer
+    turns them into graphics on an undefined layer (no effect on the pour). They become KiCad rule areas
+    on F.Cu / B.Cu that forbid copper pour only (tracks, vias, pads stay allowed, as in the Eagle Gerber)."""
+    R.h('PCB: Eagle restrict areas (tRestrict / bRestrict) -> KiCad rule areas')
+    root = eagle_root(ebrd)
+    plain = root.find('drawing/board/plain') if root is not None else None
+    if plain is None:
+        R.p('none'); return
+    polys = []                                      # (layer, pts in Eagle coords, what)
+    for e in plain:
+        L = e.get('layer')
+        if L not in _RESTRICT:
+            continue
+        if e.tag == 'wire':
+            x1, y1, x2, y2 = (float(e.get(k)) for k in ('x1', 'y1', 'x2', 'y2'))
+            w = float(e.get('width') or 0)
+            if w <= 0:
+                continue
+            pts = _eagle_arc_pts(x1, y1, x2, y2, float(e.get('curve') or 0))
+            polys.append((L, _thick_path(pts, w / 2, round_caps=e.get('cap') != 'flat'), 'wire'))
+        elif e.tag == 'rectangle':
+            x1, y1, x2, y2 = (float(e.get(k)) for k in ('x1', 'y1', 'x2', 'y2'))
+            rot = float(re.sub(r'[^\d.-]', '', e.get('rot') or '0') or 0)
+            cx, cy = (x1 + x2) / 2, (y1 + y2) / 2; ca, sa = math.cos(math.radians(rot)), math.sin(math.radians(rot))
+            corners = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+            polys.append((L, [(cx + (x - cx) * ca - (y - cy) * sa, cy + (x - cx) * sa + (y - cy) * ca) for x, y in corners], 'rectangle'))
+        elif e.tag == 'polygon':
+            pts = [(float(v.get('x')), float(v.get('y'))) for v in e.findall('vertex')]
+            if len(pts) >= 3:
+                polys.append((L, pts, 'polygon'))
+        elif e.tag == 'circle':
+            x, y, r_ = float(e.get('x')), float(e.get('y')), float(e.get('radius'))
+            w = float(e.get('width') or 0)
+            rr = r_ + w / 2
+            polys.append((L, [(x + rr * math.cos(2 * math.pi * k / 32), y + rr * math.sin(2 * math.pi * k / 32)) for k in range(32)], 'circle'))
+    if not polys:
+        R.p('none'); return
+    tree = read_sx(pcb_path)
+    for L, pts, what in polys:
+        layer, nm = _RESTRICT[L]
+        tree.append(['zone', ['layer', Q(layer)], ['uuid', new_uuid()], ['name', Q(f'Eagle {nm}')], ['hatch', 'edge', '0.5'],
+                     ['connect_pads', ['clearance', '0']], ['min_thickness', '0.25'], ['filled_areas_thickness', 'no'],
+                     ['keepout', ['tracks', 'allowed'], ['vias', 'allowed'], ['pads', 'allowed'], ['copperpour', 'not_allowed'],
+                      ['footprints', 'allowed']],
+                     ['placement', ['enabled', 'no'], ['sheetname', Q('')]],
+                     ['fill', ['thermal_gap', '0.5'], ['thermal_bridge_width', '0.5']],
+                     ['polygon', ['pts'] + [['xy', f'{x:.4f}', f'{-y:.4f}'] for x, y in pts]]])
+    c = Counter((_RESTRICT[L][1], w) for L, _, w in polys)
+    R.p(f'{len(polys)} Eagle restrict shapes -> KiCad rule areas (no copper pour): '
+        + ', '.join(f'{v} {k[1]} on {k[0]}' for k, v in sorted(c.items()))
+        + '. Eagle keeps its pours out of them (e.g. the wider pour gap along differential pairs); before this they were '
+          'plain graphics and the KiCad pour came closer than in the Eagle Gerber')
+    if not dry:
+        write_sx(pcb_path, tree)
 
 
 def eagle_zone_outlines(pcb_path, ebrd, dry, quiet=False):
@@ -3183,6 +3837,9 @@ def fix_dangling_track_ends(cli, pcb_path, tmpdir, dry):
         for o in owners(t):
             if o.HitTest(P, 0):
                 return o
+        for o in owners(t):                       # the track copper (round end) overlaps the pad / via:
+            if o.HitTest(P, t.GetWidth() // 2):   # Eagle connects by overlap
+                return o
         return None
     def end_free(t, P):
         L, n = t.GetLayer(), t.GetNetCode()
@@ -3203,7 +3860,14 @@ def fix_dangling_track_ends(cli, pcb_path, tmpdir, dry):
         o = covered_by(t)
         if o is not None:
             removed.append(f'{t.GetNetname()} in {name(o)}'); act_rm.add(u); segs[:] = [x for x in segs if x is not t]
-            led[t.GetNetname()] += t.GetLength() / 1e6; continue
+            if asking():
+                propose('Track pieces lying inside a pad / via (copper unchanged)',
+                        f'{"arc" if t.Type() == pcbnew.PCB_ARC_T else "track"} {t.GetNetname()} {board.GetLayerName(t.GetLayer())} '
+                        f'{t.GetLength() / 1e6:.3f} mm completely inside {name(o)}', pcb_path, drop=[u],
+                        pic=pcb_pic(board, [u]), ledger={t.GetNetname(): t.GetLength() / 1e6})
+            else:
+                led[t.GetNetname()] += t.GetLength() / 1e6
+            continue
         L, n = t.GetLayer(), t.GetNetCode()
         fixed = False
         for which in ('start', 'end'):
@@ -3214,7 +3878,14 @@ def fix_dangling_track_ends(cli, pcb_path, tmpdir, dry):
             if o is not None:
                 c = o.GetPosition()
                 if c.x != P.x or c.y != P.y:
-                    act_add.append((u, P.x, P.y, c.x, c.y)); fixed = True
+                    w_ = t.GetWidth()
+                    if o.Type() != pcbnew.PCB_VIA_T:          # stay inside the pad copper
+                        sz = o.GetSize(L) if hasattr(o, 'GetSize') else None
+                        try:
+                            w_ = min(w_, sz.x, sz.y)
+                        except Exception:
+                            pass
+                    act_add.append((u, P.x, P.y, c.x, c.y, w_)); fixed = True
                     led[t.GetNetname()] -= dist(P, c) / 1e6
                     joined.append(f'{t.GetNetname()} -> {name(o)}')
                 continue
@@ -3226,11 +3897,19 @@ def fix_dangling_track_ends(cli, pcb_path, tmpdir, dry):
                             best = (dist(Q, P), Q)
             if best:
                 act_mv.append((u, which, best[1].x, best[1].y)); fixed = True
+                if t.Type() != pcbnew.PCB_ARC_T:          # the length change goes into the QC ledger
+                    O = t.GetEnd() if which == 'start' else t.GetStart()
+                    led[t.GetNetname()] -= (dist(O, best[1]) - dist(O, P)) / 1e6
                 snapped.append(f'{t.GetNetname()} ({best[0] / 1000:.1f} um)')
         if not fixed:
             P = t.GetStart()
             left.append(f'{t.GetNetname()} {board.GetLayerName(L)} ({P.x / 1e6:.2f}, {P.y / 1e6:.2f}) mm')
+    n_prop = 0
+    if asking() and act_rm:
+        n_prop = len(act_rm); act_rm = set(); removed = []
     if not (removed or joined or snapped):
+        if n_prop:
+            R.p(f'{n_prop} track pieces lying completely inside a pad / via of their net proposed for deletion'); return
         R.p(f'{len(ids)} open track ends, none inside or next to a pad / via / track of their own net - left for review')
         return
     if dry:
@@ -3251,10 +3930,10 @@ def fix_dangling_track_ends(cli, pcb_path, tmpdir, dry):
         nd = nodes.get(u)
         if nd is not None:
             k = kid(nd, which); k[1], k[2] = mm(x), mm(y)
-    for u, x1, y1, x2, y2 in act_add:
+    for u, x1, y1, x2, y2, w_ in act_add:
         nd = nodes.get(u)
         if nd is not None:
-            tree.append(['segment', ['start', mm(x1), mm(y1)], ['end', mm(x2), mm(y2)], list(kid(nd, 'width')),
+            tree.append(['segment', ['start', mm(x1), mm(y1)], ['end', mm(x2), mm(y2)], ['width', mm(w_)],
                          list(kid(nd, 'layer')), list(kid(nd, 'net')), ['uuid', new_uuid()]])
     tree[:] = [nd for nd in tree if not (isinstance(nd, list) and nd and nd[0] in ('segment', 'arc')
                                          and kid(nd, 'uuid') and str(kid(nd, 'uuid')[1]) in act_rm)]
@@ -3292,7 +3971,10 @@ def fix_dangling_track_ends(cli, pcb_path, tmpdir, dry):
         R.p(f'  (could not record the length changes: {ex})')
     n1 = bad(d1)['track_dangling']
     R.p(f'DRC "track has unconnected end": {len(ids)} -> {n1}; no new DRC error')
-    R.p(f'  {len(removed)} bend pieces lying completely inside a via / pad of their net removed (copper unchanged)')
+    if n_prop:
+        R.p(f'  {n_prop} track pieces lying completely inside a via / pad of their net proposed for deletion')
+    else:
+        R.p(f'  {len(removed)} bend pieces lying completely inside a via / pad of their net removed (copper unchanged)')
     if joined:
         R.p(f'  {len(joined)} ends joined to the pad / via centre: ' + ', '.join(sorted(set(joined))[:20]))
     if snapped:
@@ -3300,6 +3982,322 @@ def fix_dangling_track_ends(cli, pcb_path, tmpdir, dry):
     if left:
         R.p(f'  {len(left)} left for review (the end is in empty space - an Eagle stub, check in the PCB editor): '
             + '; '.join(left[:15]) + (' ...' if len(left) > 15 else ''))
+
+SILK_MIN_THICK = 0.08          # thinnest silkscreen line the usual board houses print
+
+
+def fix_pcb_finishing(cli, pcb_path, tmpdir, dry):
+    """Clean-up a KiCad DRC asks for and Eagle never checked (silkscreen, back-side text, dead copper).
+    Copper changes are DRC-guarded and undone if anything gets worse."""
+    R.h('PCB: silkscreen / text / dead copper finishing')
+    try:
+        import pcbnew
+    except ImportError:
+        R.p('pcbnew module not available - skipped'); return
+    pro_path = os.path.splitext(pcb_path)[0] + '.kicad_pro'
+    board = pcbnew.LoadBoard(pcb_path)
+    outline = pcbnew.SHAPE_POLY_SET()
+    try:
+        ok = board.GetBoardPolygonOutlines(outline)
+    except TypeError:
+        ok = board.GetBoardPolygonOutlines(outline, True)
+    inside = (lambda P: outline.Contains(P)) if ok and outline.OutlineCount() else None
+    silk = {pcbnew.F_SilkS: 'F', pcbnew.B_SilkS: 'B'}
+    to_fab, shrink = set(), set()
+    if inside:
+        for fp in board.GetFootprints():
+            for g in fp.GraphicalItems():
+                if g.GetLayer() in silk and g.Type() == pcbnew.PCB_SHAPE_T and g.GetShape() == pcbnew.SHAPE_T_SEGMENT:
+                    if not (inside(g.GetStart()) and inside(g.GetEnd())):
+                        to_fab.add(g.m_Uuid.AsString())
+            r = fp.Reference()
+            if r.GetLayer() in silk and r.IsVisible():
+                bb = r.GetBoundingBox()
+                cs = [pcbnew.VECTOR2I(x, y) for x in (bb.GetLeft(), bb.GetRight()) for y in (bb.GetTop(), bb.GetBottom())]
+                if any(inside(c) for c in cs) and not all(inside(c) for c in cs):
+                    shrink.add(fp.GetReference())
+    del board
+    tree = read_sx(pcb_path)
+    n_fab = n_thk = n_mir = 0
+    hs = []
+    thk = []
+    def font_fix(eff):
+        nonlocal n_thk
+        fo = kid(eff, 'font') if eff is not None else None
+        sz = kid(fo, 'size') if fo is not None else None
+        if sz is None:
+            return
+        h = min(float(sz[1]), float(sz[2]) if len(sz) > 2 else float(sz[1]))
+        hs.append(h)
+        th = kid(fo, 'thickness')
+        hi = h / 4                                    # KiCad: pen width at most 1/4 of the text size
+        lo = min(SILK_MIN_THICK, hi)                  # (Eagle ratio up to 31 % - drawn thinner by KiCad anyway)
+        cur = float(th[1]) if th is not None else None
+        want = None if cur is not None and lo - 1e-6 <= cur <= hi + 1e-6 else (lo if cur is None or cur < lo else hi)
+        if want is not None:
+            want = f'{math.floor(want * 10000) / 10000:g}'
+            if th is None:
+                fo.append(['thickness', want])
+            else:
+                th[1] = want
+            n_thk += 1
+            thk.append(float(want))
+        else:
+            thk.append(cur)
+    shrunk = []
+    for fp in kids(tree, 'footprint'):
+        ref = prop_val(fp, 'Reference', '')
+        for g in fp:
+            if not (isinstance(g, list) and g):
+                continue
+            ly = kid(g, 'layer')
+            L = str(ly[1]) if ly else ''
+            if g[0] in ('fp_line',) and L in ('F.SilkS', 'B.SilkS'):
+                uu = kid(g, 'uuid')
+                if uu and str(uu[1]) in to_fab:
+                    ly[1] = Q(L[0] + '.Fab'); n_fab += 1
+            elif g[0] in ('property', 'fp_text') and L in ('F.SilkS', 'B.SilkS'):
+                if g[0] == 'property' and str(g[1]) == 'Reference' and ref in shrink:
+                    fo = kid(kid(g, 'effects') or [], 'font')
+                    sz = kid(fo, 'size') if fo is not None else None
+                    if sz is not None and float(sz[1]) > 0.5:
+                        sz[1] = sz[2] = '0.5'; shrunk.append(ref)
+                font_fix(kid(g, 'effects'))
+    for g in kids(tree, 'gr_text'):
+        L = str((kid(g, 'layer') or ['', ''])[1])
+        eff = kid(g, 'effects')
+        if L in ('F.SilkS', 'B.SilkS'):
+            font_fix(eff)
+        if L.startswith('B.') and eff is not None:
+            j = kid(eff, 'justify')
+            if j is None or 'mirror' not in [str(x) for x in j[1:]]:
+                if j is None:
+                    j = ['justify']; eff.append(j)
+                j[1:] = [('right' if x == 'left' else 'left' if x == 'right' else x) for x in j[1:]] + ['mirror']
+                n_mir += 1
+    R.p(f'{n_fab} footprint silkscreen lines outside / across the board edge moved to the Fab layer '
+        '(the board house clips them anyway)')
+    if shrunk:
+        R.p(f'{len(shrunk)} reference texts cut by the board edge reduced to 0.5 mm: ' + ', '.join(sorted(shrunk)))
+    R.p(f'{n_thk} silkscreen texts: line width brought into {SILK_MIN_THICK} mm .. 1/4 of the text size '
+        '(thinner is not printed, thicker KiCad does not draw)')
+    R.p(f'{n_mir} texts on back layers mirrored (Eagle shows them unmirrored; the text keeps its place)')
+    if dry:
+        return
+    write_sx(pcb_path, tree)
+    try:
+        pro = json.load(open(pro_path, encoding='utf-8'))
+        ds = pro.setdefault('board', {}).setdefault('design_settings', {})
+        r = ds.setdefault('rules', {})
+        if hs:
+            r['min_text_height'] = min(r.get('min_text_height', 0.8), math.floor(min(hs) * 1000) / 1000)
+        r['min_text_thickness'] = min([SILK_MIN_THICK] + [t for t in thk if t])
+        sev = ds.setdefault('rule_severities', {})
+        for k in ('silk_overlap', 'silk_over_copper'):    # Eagle does not check silkscreen clearance / clipping
+            sev[k] = 'ignore'
+        _save_json(pro, pro_path)
+        R.p(f'text rules: min height {r.get("min_text_height")} mm (smallest text Eagle has), min thickness '
+            f'{r["min_text_thickness"]} mm; silkscreen clearance / clipped-by-mask checks set to ignore (Eagle has none - '
+            'turn them back on after rearranging the silkscreen)')
+    except Exception as ex:
+        R.p(f'could not update the text rules: {ex}')
+    if cli:
+        _remove_dead_copper(cli, pcb_path, pro_path, tmpdir)
+
+
+COVERED_STUBS = set()
+
+
+def _stubs_touching_copper(pcb_path, ids):
+    """Open-ended tracks whose free end still overlaps a pad / via of their net with its copper
+    (Eagle connects by overlap): real connections, never removed as dead copper."""
+    keep = set()
+    try:
+        import pcbnew
+        b = pcbnew.LoadBoard(pcb_path)
+        tr = list(b.GetTracks())
+        vias = [t for t in tr if t.Type() == pcbnew.PCB_VIA_T]
+        pads = [p for f in b.GetFootprints() for p in f.Pads()]
+        for t in tr:
+            u = t.m_Uuid.AsString()
+            if u not in ids or t.Type() == pcbnew.PCB_VIA_T:
+                continue
+            L, n, r = t.GetLayer(), t.GetNetCode(), t.GetWidth() // 2
+            own = [v for v in vias if v.GetNetCode() == n] + [p for p in pads if p.GetNetCode() == n and p.IsOnLayer(L)]
+            same = [o for o in tr if o is not t and o.Type() != pcbnew.PCB_VIA_T and o.GetLayer() == L and o.GetNetCode() == n]
+            pts = [t.GetStart(), t.GetEnd()] + ([t.GetMid()] if t.Type() == pcbnew.PCB_ARC_T else
+                                                [pcbnew.VECTOR2I((t.GetStart().x + t.GetEnd().x) // 2, (t.GetStart().y + t.GetEnd().y) // 2)])
+            if any(o.GetWidth() >= t.GetWidth() and all(o.HitTest(q, 0) for q in pts) for o in same):
+                COVERED_STUBS.add(u)             # a duplicate lying on a wider / equal track: copper unchanged
+                continue
+            touch = own + same                   # Eagle also connects a track end lying on another track
+            for P in (t.GetStart(), t.GetEnd()):
+                linked = any(o.HitTest(P, 0) for o in own) or any(
+                    o is not t and o.Type() != pcbnew.PCB_VIA_T and o.GetLayer() == L and o.GetNetCode() == n and
+                    (abs(o.GetStart().x - P.x) + abs(o.GetStart().y - P.y) <= 1000 or
+                     abs(o.GetEnd().x - P.x) + abs(o.GetEnd().y - P.y) <= 1000) for o in tr)
+                if not linked and any(o.HitTest(P, r) for o in touch):
+                    keep.add(u)
+        del b
+    except Exception:
+        pass
+    return keep
+
+
+def _arc_len3(p0, p1, p2):
+    """length of the circular arc through start, mid, end"""
+    ax, ay = p0; bx, by = p1; cx, cy = p2
+    d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+    if abs(d) < 1e-12:
+        return math.hypot(cx - ax, cy - ay)
+    ux = ((ax * ax + ay * ay) * (by - cy) + (bx * bx + by * by) * (cy - ay) + (cx * cx + cy * cy) * (ay - by)) / d
+    uy = ((ax * ax + ay * ay) * (cx - bx) + (bx * bx + by * by) * (ax - cx) + (cx * cx + cy * cy) * (bx - ax)) / d
+    r = math.hypot(ax - ux, ay - uy)
+    t0, t1, t2 = (math.atan2(y - uy, x - ux) for x, y in (p0, p1, p2))
+    sw = (t2 - t0) % (2 * math.pi)
+    if (t1 - t0) % (2 * math.pi) > sw:          # the mid point is on the other way round
+        sw = 2 * math.pi - sw
+    return r * sw
+
+
+DEAD_STUB_MAX = 1.5     # mm: longer open-ended tracks may be intentional (RF stubs) - left for review
+
+
+def _remove_dead_copper(cli, pcb_path, pro_path, tmpdir):
+    """What KiCad's 'Cleanup Tracks & Vias' does with 'delete vias connected on one layer' and
+    'delete tracks unconnected at one end': vias that connect nothing and short track stubs that end in
+    free space (Eagle leftovers). Repeated until nothing changes (a stub chain), max 4 passes;
+    DRC-guarded, undone if any connectivity error appears."""
+    d0 = drc_run(cli, pcb_path, tmpdir, parity=False)
+    if d0 is None:
+        return
+    def cnt(d):
+        c = Counter(v['type'] for v in d.get('violations', []))
+        c['unconnected_items'] = len(d.get('unconnected_items', []))
+        return c
+    b0 = cnt(d0)
+    baks = [(f, f + '.deadcu.bak') for f in (pcb_path, pro_path) if os.path.isfile(f)]
+    for f, b in baks:
+        shutil.copy2(f, b)
+    led = Counter(); n_via = n_trk = 0; d = d0; rm_vias = []; info = []
+    for _ in range(4):
+        ids = {}
+        for v in d.get('violations', []):
+            if v['type'] in ('via_dangling', 'track_dangling'):
+                for it in v.get('items', []):
+                    if it.get('uuid'): ids[it['uuid']] = v['type']
+        if not ids:
+            break
+        if asking():                               # already proposed by another step (pieces inside a pad)
+            done_ = {u for pr in PROPOSALS for u in pr['drop']}
+            ids = {k: v for k, v in ids.items() if k not in done_}
+            if not ids:
+                break
+        keep = _stubs_touching_copper(pcb_path, ids)
+        tree = read_sx(pcb_path); drop = set()
+        for nd in tree:
+            if not (isinstance(nd, list) and nd and nd[0] in ('segment', 'arc', 'via')):
+                continue
+            uu = kid(nd, 'uuid'); u = str(uu[1]) if uu else None
+            if u not in ids or u in keep:
+                continue
+            if nd[0] == 'via':
+                drop.add(u); n_via += 1
+                at, dr, net = kid(nd, 'at'), kid(nd, 'drill'), kid(nd, 'net')
+                rm_vias.append([float(at[1]), float(at[2]), float(dr[1]) if dr else 0.0, str(net[-1]) if net else ''])
+                info.append((u, 'via', rm_vias[-1][3], 0.0, rm_vias[-1]))
+                continue
+            a, b = kid(nd, 'start'), kid(nd, 'end')
+            ln = math.hypot(float(a[1]) - float(b[1]), float(a[2]) - float(b[2]))
+            if nd[0] == 'arc':
+                m = kid(nd, 'mid')
+                ln = _arc_len3((float(a[1]), float(a[2])), (float(m[1]), float(m[2])), (float(b[1]), float(b[2])))
+            if ln <= DEAD_STUB_MAX:
+                drop.add(u); n_trk += 1
+                net = kid(nd, 'net')
+                led[str(net[-1]) if net else ''] += ln
+                info.append((u, 'track', str(net[-1]) if net else '', ln, str(kid(nd, 'layer')[1])))
+        if not drop:
+            break
+        tree[:] = [nd for nd in tree if not (isinstance(nd, list) and nd and nd[0] in ('segment', 'arc', 'via')
+                                             and kid(nd, 'uuid') and str(kid(nd, 'uuid')[1]) in drop)]
+        write_sx(pcb_path, tree)
+        d = drc_run(cli, pcb_path, tmpdir, parity=False)
+        if d is None:
+            break
+    worse = ['DRC failed'] if d is None else []
+    if d is not None:
+        b1 = cnt(d)
+        for k in ('unconnected_items', 'shorting_items', 'clearance', 'hole_clearance', 'track_width',
+                  'copper_edge_clearance', 'connection_width', 'items_not_allowed'):
+            if b1[k] > b0[k]:
+                worse.append(f'{k} {b0[k]}->{b1[k]}')
+    if worse:
+        for f, b in baks:
+            shutil.copy2(b, f); os.remove(b)
+        R.p(f'dead copper: removing {n_via} vias / {n_trk} stubs made the DRC worse ({", ".join(worse)}) -> undone')
+        return
+    if asking():                                   # checked - only proposed: restore, record
+        for f, b in baks:
+            shutil.copy2(b, f); os.remove(b)
+        try:
+            t = read_sx(pcb_path)
+            nets = {str(n[1]): str(n[2]) for n in kids(t, 'net') if len(n) > 2}
+        except Exception:
+            nets = {}
+        import pcbnew
+        board = pcbnew.LoadBoard(pcb_path)
+        for u, kind, net, ln, extra in info:
+            nn = nets.get(net, net)
+            if kind == 'via':
+                v = list(extra); v[3] = nn
+                propose('Dead copper: vias connected on one layer only',
+                        f'via {nn} at ({v[0]:.2f}, {v[1]:.2f}) mm, drill {v[2]:g} mm - connects nothing', pcb_path,
+                        drop=[u], pic=pcb_pic(board, [u]), vias=[v])
+            else:
+                cov = u in COVERED_STUBS
+                propose('Track pieces lying on another track of the same net (copper unchanged)' if cov else
+                        'Dead copper: track stubs ending in free space',
+                        f'{"duplicate" if cov else "stub"} {nn} {extra} {ln:.3f} mm - '
+                        + ('lies completely on a wider / equal track of its net' if cov else
+                           'one end is not connected to anything'), pcb_path,
+                        drop=[u], pic=pcb_pic(board, [u]), ledger={nn: ln})
+        del board
+        R.p(f'dead copper: {n_via} vias connected on one layer only and {n_trk} track stubs (<= {DEAD_STUB_MAX} mm) '
+            'ending in free space proposed for deletion (DRC checked: no new error without them)')
+        return
+    for f, b in baks:
+        os.remove(b)
+    nets = {}
+    if any(k for k in led) or rm_vias:
+        try:                                       # the ledger is keyed by net NAME
+            t = read_sx(pcb_path)
+            nets = {str(n[1]): str(n[2]) for n in kids(t, 'net') if len(n) > 2}
+        except Exception:
+            pass
+        led2 = Counter({nets.get(k, k): v for k, v in led.items()})
+        for v in rm_vias:
+            v[3] = nets.get(v[3], v[3])
+        TRACK_EDIT_LEN.update(led2)
+        try:
+            f = os.path.join(os.path.dirname(pcb_path), 'eaglefix_track_edits.json')
+            old_ = json.load(open(f, encoding='utf-8')) if os.path.isfile(f) else {}
+            for k_, v_ in led2.items():
+                old_[k_] = old_.get(k_, 0) + v_
+            _save_json(old_, f)
+        except Exception as ex:
+            R.p(f'  (could not record the length changes: {ex})')
+    if rm_vias:
+        try:                                       # QC: Eagle has these vias - the geometry check counts them back
+            f = os.path.join(os.path.dirname(pcb_path), 'eaglefix_removed_vias.json')
+            old_ = json.load(open(f, encoding='utf-8')) if os.path.isfile(f) else []
+            _save_json(old_ + rm_vias, f)
+        except Exception as ex:
+            R.p(f'  (could not record the removed vias: {ex})')
+    R.p(f'dead copper: {n_via} vias connected on one layer only and {n_trk} track stubs (<= {DEAD_STUB_MAX} mm) '
+        f'ending in free space removed; DRC "unconnected end" {b0["track_dangling"]} -> {cnt(d)["track_dangling"]}, '
+        f'"via on one layer" {b0["via_dangling"]} -> {cnt(d)["via_dangling"]}; no new DRC error')
+
 
 def fix_pcb_sexpr(pcb_path, sch_refs, dry, ebrd=None):
     R.h('PCB: layers / board-only items')
@@ -3319,10 +4317,11 @@ def fix_pcb_sexpr(pcb_path, sch_refs, dry, ebrd=None):
             for t in ('board_only', 'exclude_from_pos_files', 'exclude_from_bom'):
                 if t not in attr: attr.append(t)
             n_bo += 1
-    n_np = n_cu = n_nt = 0
+    n_np = n_cu = n_nt = n_mk = 0
     for fp in kids(tree, 'footprint'):
         n_np += _npth_no_copper(fp)
         n_cu += _fp_copper_polys_to_pads(fp)
+        n_mk += _fp_mask_shapes_to_pad_masks(fp, pcb_path)
         n_nt += _fp_net_ties(fp)
     n_via = _via_restring(tree, eagle_brd_rules(ebrd)[0]) if ebrd else 0
     n_zt, zt_note = _zone_thermals(tree, ebrd) if ebrd else (0, '')
@@ -3334,6 +4333,9 @@ def fix_pcb_sexpr(pcb_path, sch_refs, dry, ebrd=None):
     R.p(f'{n_undef} items moved from UNDEFINED layer to Dwgs.User')
     R.p(f'{n_np} NPTH holes: net-less copper ring removed (pad size = drill)')
     R.p(f'{n_cu} package copper polygons -> custom pads with the net of the pad they touch (Eagle polygon-in-package)')
+    R.p(f'{n_mk} package solder-mask graphics over pads removed - those pads open the mask themselves '
+        '(Eagle tStop/bStop polygons for copper-polygon pads such as USB-C shell tabs; the opening now '
+        'follows the copper + mask margin, so it is smaller than in the Eagle Gerber)')
     R.p(f'{n_nt} net-tie pad groups (copper links inside Eagle packages, e.g. board-mounted 0R arrays)')
     R.p(f'{n_via} vias enlarged to Eagle restring (drill + 2 x clamp(rvViaOuter*drill, rlMin, rlMax))')
     R.p(f'{n_nm} non-plated holes get Eagle\'s solder-mask stop frame (KiCad: none)')
@@ -4156,6 +5158,8 @@ def apply_design_rules(pro_path, brd, dry):
     if g('mdCopperDimension') is not None: setv['min_copper_edge_clearance'] = g('mdCopperDimension')
     if g('mdDrill'): setv['min_hole_clearance'] = g('mdDrill')   # Eagle Drill/Hole = copper-to-hole
     if g('msMicroVia') and g('msMicroVia') < 5: setv['min_microvia_drill'] = g('msMicroVia')
+    setv['min_resolved_spokes'] = 1        # Eagle has no minimum thermal spoke count (KiCad default 2 ->
+                                           # 'starved thermal' on every pad Eagle connected with one spoke)
     for k, v in setv.items():
         old = r.get(k); r[k] = round(v, 4)
         R.p(f'{k}: {old} -> {r[k]} mm')
@@ -4179,9 +5183,10 @@ def apply_design_rules(pro_path, brd, dry):
     for kc in cls:
         if kc.get('name') in named:
             num, ec = named[kc['name']]
-            # Eagle <clearance class="m"> inside class n is the n:m pair value (written to the
-            # .kicad_dru); only n:0 applies against everything = the KiCad class clearance
-            own = ec.get('clearance', {}).get('0')
+            # Eagle net class "Clearance" (Rules tab) is stored as <clearance class="n"> inside
+            # class n: it applies between this class and every other signal, polygon pours too
+            # (= KiCad net class clearance). Other <clearance class="m"> are class pairs (.kicad_dru).
+            own = ec.get('clearance', {}).get(num) or ec.get('clearance', {}).get('0')
             newc = round(own if own else (wc or kc.get('clearance', 0.2)), 4)
             if kc.get('clearance') != newc:
                 R.p(f"net class {kc['name']} clearance: {kc.get('clearance')} -> {newc} mm"
@@ -4199,7 +5204,7 @@ def apply_design_rules(pro_path, brd, dry):
             kc = {k: v for k, v in dflt.items() if k not in ('name', 'priority')}
             kc['name'] = n
             kc['priority'] = max([c.get('priority', 0) for c in cls if c.get('name') != 'Default'] + [-1]) + 1
-            own = ec.get('clearance', {}).get('0')
+            own = ec.get('clearance', {}).get(num) or ec.get('clearance', {}).get('0')
             kc['clearance'] = round(own if own else (wc or dflt.get('clearance', 0.2)), 4)
             if ec.get('width'):
                 kc['track_width'] = round(ec['width'], 4)
@@ -4569,7 +5574,27 @@ def mfg_check(d, pcb, ref, ebrd, cli):
             raise RuntimeError(f'kicad-cli export failed: {(t1 + t2).strip()[:200]}')
         R.p(f'reference: {ref}')
         r = GC.compare(ref, tmp, ebrd, log=lambda t: R.p(t.strip()))
+        n_rm = 0
+        try:                                   # vias deleted on purpose (dead copper, approved / test mode)
+            rv = json.load(open(os.path.join(d, 'eaglefix_removed_vias.json'), encoding='utf-8'))
+        except Exception:
+            rv = []
+        dr = r.get('drill')
+        if rv and dr and dr.get('missing_in_kicad'):
+            ax, ay = r['align']['dx'], r['align']['dy']
+            keep = []
+            for x, y, dia in dr['missing_in_kicad']:
+                if any(math.hypot(vx + ax - x, -vy + ay - y) <= 0.05 and abs(vd - dia) <= 0.03 for vx, vy, vd, _ in rv):
+                    n_rm += 1
+                else:
+                    keep.append((x, y, dia))
+            if n_rm:
+                dr['missing_in_kicad'] = keep
+                r['verdict'] = GC.verdict(r)
         fails, warns, infos = r['verdict']
+        if n_rm:
+            infos = list(infos) + [f'drill: {n_rm} EAGLE holes are vias deleted on purpose (connected on one layer only - '
+                                   'listed in eaglefix_removed_vias.json)']
         dd = r.get('drill') or {}
         R.p(f"drill: EAGLE {dd.get('eagle')}, KiCad {dd.get('kicad')}, matched {dd.get('matched')}; "
             f"alignment dx {r['align']['dx']} dy {r['align']['dy']} mm ({r['align']['votes']} hole pairs)")
@@ -4731,7 +5756,7 @@ def render_3d(cli, pcb, d):
         if not os.path.isfile(png):
             R.p(f'3D render {name} failed: {txt.strip()[:200]}')
     if src != pcb:
-        for f in (src, os.path.splitext(src)[0] + '.kicad_prl'):
+        for f in [src] + [os.path.splitext(src)[0] + e for e in ('.kicad_prl', '.kicad_pro', '.kicad_dru')]:
             if os.path.isfile(f):
                 os.remove(f)
     R.p(f'3D renders: {out}')
@@ -4984,7 +6009,14 @@ def main():
     ap.add_argument('--layers', choices=('auto', 'ask', 'keep', 'trim'), default='auto',
                     help='empty inner copper layers of a board whose Eagle source uses none: auto = remove, '
                          'ask = ask on stdin (@@ASK protocol, used by the plugin GUI), keep = leave, trim = remove')
+    ap.add_argument('--deletions', choices=('ask', 'apply'),
+                    help='ask (default): items the fix would delete become proposals for the user; '
+                         'apply: delete them (test runs; also env EXHUMER_TEST=1)')
+    ap.add_argument('--apply-proposals', metavar='IDS',
+                    help='delete the approved proposals (all, or d001,d002,...) of an earlier run and stop')
     a = ap.parse_args()
+    if a.deletions:
+        DELETE_MODE[0] = a.deletions
     global LAYER_MODE
     LAYER_MODE = a.layers
     if a.import_meta:
@@ -4994,7 +6026,7 @@ def main():
             print(f'--import-meta ignored: {ex}')
 
     d = os.path.abspath(a.project_dir)
-    pros = glob.glob(os.path.join(d, '*.kicad_pro'))
+    pros = sorted(glob.glob(os.path.join(d, '*.kicad_pro')), key=lambda x: (os.path.basename(x).startswith('_'), x))
     if not pros:
         sys.exit('no .kicad_pro in ' + d)
     pro = pros[0]; proj = os.path.splitext(os.path.basename(pro))[0]
@@ -5054,6 +6086,11 @@ def main():
     tmpdir = d
     global VIEW
     VIEW = CliView(d, proj)
+    if a.apply_proposals:
+        ids = 'all' if a.apply_proposals == 'all' else set(a.apply_proposals.split(','))
+        rc_ = apply_proposals(d, proj, cli, ids, tmpdir)
+        VIEW.close()
+        sys.exit(rc_)
     if VIEW.multi:
         R.p(f'{len(VIEW.tls)} top-level sheets (KiCad 10 multi-root) - kicad-cli runs on a temporary hierarchical copy')
 
@@ -5166,6 +6203,7 @@ def main():
     fix_dangling_wire_labels(sheets)
     fix_eagle_frames(sheets, keep=a.keep_eagle_frames)
     fix_pinless(sheets)
+    mark_not_fitted(sheets)
     fix_nc_pins(d, sheets, eagle_sch_truth(esch) if esch else None, a.dry_run)
     if a.libfix:
         fix_pin_types_bidirectional(d, sheets, a.dry_run)
@@ -5181,11 +6219,13 @@ def main():
             trim_empty_inner_layers(pcb, ebrd, a.dry_run)
             untent_large_vias(pcb, ebrd, a.dry_run)
             eagle_zone_outlines(pcb, ebrd, a.dry_run)
+            eagle_restrict_areas(pcb, ebrd, a.dry_run)
             eagle_inner_round_pads(pcb, ebrd, a.dry_run)
             edge_text_to_drawing(pcb, a.dry_run)
             add_milling(pcb, ebrd, a.dry_run)
             plated_milling_slots(pcb, a.dry_run)
         assign_orphan_pads(pcb, a.dry_run)
+        mark_not_fitted_pcb(pcb, a.dry_run)
         nicks = Counter()
         for sh in sheets:
             for inst in sh.instances():
@@ -5232,6 +6272,8 @@ def main():
             sync_pcb_to_sch(cli, root_sch, pcb, pro, sheets, tmpdir, a.dry_run)
             progress(37, 'Track ends that stop short of their pad')
             fix_dangling_track_ends(cli, pcb, tmpdir, a.dry_run)
+            progress(38, 'Silkscreen, text and dead copper')
+            fix_pcb_finishing(cli, pcb, tmpdir, a.dry_run)
 
     if not a.dry_run:
         progress(39, 'Quality control: comparing the result with the Eagle source')
@@ -5259,6 +6301,8 @@ def main():
     if not a.dry_run:
         write_metrics(d, proj, esch, ebrd, fails, st, 'fix')
     VIEW.close()
+    if not a.dry_run and not a.verify_only:
+        save_proposals(d)
     R.save(os.path.join(d, 'eaglefix_report.md'))
     print('\nReport: ' + os.path.join(d, 'eaglefix_report.md'))
     print('Next: open project, Tools > Update PCB from Schematic (F8), B (refill zones), ERC/DRC.')
