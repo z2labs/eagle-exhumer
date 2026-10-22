@@ -5593,11 +5593,23 @@ def mfg_check(d, pcb, ref, ebrd, cli):
                     keep.append((x, y, dia))
             if n_rm:
                 dr['missing_in_kicad'] = keep
-                r['verdict'] = GC.verdict(r)
+        n_cu = 0
+        if rv:                                 # their copper rings are gone too: not a conversion difference
+            ax, ay = r['align']['dx'], r['align']['dy']
+            pts = [(vx + ax, -vy + ay) for vx, vy, _, _ in rv]
+            for k_, e_ in (r.get('layers') or {}).items():
+                if not k_.startswith(('cu:', 'mask:')) or not e_.get('spots'):
+                    continue
+                keep_ = [sp for sp in e_['spots'] if not (sp.get('only_in') == 'eagle' and
+                         any(math.hypot(sp['x'] - x, sp['y'] - y) <= 0.5 for x, y in pts))]
+                n_cu += len(e_['spots']) - len(keep_)
+                e_['spots'] = keep_
+        if n_rm or n_cu:
+            r['verdict'] = GC.verdict(r)
         fails, warns, infos = r['verdict']
-        if n_rm:
-            infos = list(infos) + [f'drill: {n_rm} EAGLE holes are vias deleted on purpose (connected on one layer only - '
-                                   'listed in eaglefix_removed_vias.json)']
+        if n_rm or n_cu:
+            infos = list(infos) + [f'{n_rm} EAGLE drill holes and {n_cu} copper / mask spots are vias deleted on purpose '
+                                   '(connected on one layer only - listed in eaglefix_removed_vias.json)']
         dd = r.get('drill') or {}
         R.p(f"drill: EAGLE {dd.get('eagle')}, KiCad {dd.get('kicad')}, matched {dd.get('matched')}; "
             f"alignment dx {r['align']['dx']} dy {r['align']['dy']} mm ({r['align']['votes']} hole pairs)")
