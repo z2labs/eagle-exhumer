@@ -75,6 +75,21 @@ def _items(frame):
         yield from _walk_menu(mb.GetMenu(i))
 
 
+def _alive(w):
+    """True while W is still one of KiCad's top-level windows. A KiCad frame (project manager)
+    is created in C++, so its Python wrapper is not told when KiCad deletes it on quit: calling
+    a method on it then dereferences freed memory (macOS: SIGSEGV in wxWindowBase::IsEnabled
+    from the progress window's timer, a 'KiCad quit unexpectedly' box on every quit). The
+    addresses are compared without touching the object."""
+    if not w:
+        return False
+    try:
+        a = wx.siplib.unwrapinstance(w)
+        return any(wx.siplib.unwrapinstance(t) == a for t in wx.GetTopLevelWindows())
+    except Exception:
+        return False
+
+
 def _find_item(frame, pred):
     for it in _items(frame):
         try:
@@ -275,7 +290,7 @@ class LogWindow(wx.Frame):
             return
         for w in (self, self.mgr):
             try:
-                if w and isinstance(w, wx.Window) and not w.IsEnabled():
+                if isinstance(w, wx.Window) and _alive(w) and not w.IsEnabled():
                     w.Enable(True)
             except Exception:
                 pass
@@ -940,7 +955,7 @@ class ImportJob:
         # KiCad leaves the project manager disabled after the editors were opened from here
         for w in (self.mgr, self.win):
             try:
-                if w and not w.IsEnabled():
+                if _alive(w) and not w.IsEnabled():
                     w.Enable(True)
             except Exception:
                 pass

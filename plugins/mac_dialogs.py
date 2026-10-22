@@ -227,21 +227,35 @@ def save_windows(name, pid=None):
     """Cmd+S in every editor window of the project NAME (schematic / PCB editor; not the project
     manager, not our own window). Returns the window names or the error. The AX title of a frame
     is not always wx's GetTitle() (modified marker), so the windows are matched by project name.
-    KiCad's ACTION_MENU items do not react to a synthesized wxEVT_MENU on macOS, a keystroke does."""
+    KiCad's ACTION_MENU items do not react to a synthesized wxEVT_MENU on macOS, a keystroke does.
+    The window names are read first and each window is then looked up by name: raising a window
+    reorders (and an import message box can close) the live window list, which made
+    'item N of every window' invalid in the middle of the loop."""
     pid = pid or os.getpid()
     rc, out, err = _osa(f'''
 tell application "System Events"
   set p to {_proc(pid)}
   set done to {{}}
+  set names to {{}}
   repeat with w in (windows of p)
-    set n to name of w as text
+    try
+      set end of names to (name of w as text)
+    end try
+  end repeat
+  repeat with n in names
+    set n to n as text
     if n contains {_q(name)} and n does not contain "KiCad 1" and n does not start with "Eagle Exhumer" then
-      perform action "AXRaise" of w
-      set frontmost of p to true
-      delay 0.6
-      keystroke "s" using command down
-      delay 1.5
-      set end of done to n
+      try
+        set w to (first window of p whose name is n)
+        perform action "AXRaise" of w
+        set frontmost of p to true
+        delay 0.6
+        keystroke "s" using command down
+        delay 1.5
+        set end of done to n
+      on error e
+        set end of done to ("skipped " & n & ": " & e)
+      end try
     end if
   end repeat
   return done
