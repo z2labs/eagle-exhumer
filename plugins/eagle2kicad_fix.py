@@ -145,11 +145,28 @@ def asking():
     return DELETE_MODE[0] == 'ask'
 
 
-def propose(step, title, path, drop=(), add=(), pic=None, ledger=None, vias=None, note=''):
+def propose(step, title, path, drop=(), add=(), pic=None, ledger=None, vias=None, note='', mask=None):
     PROPOSALS.append({'id': f'd{len(PROPOSALS) + 1:03d}', 'step': step, 'title': title,
                       'file': os.path.basename(path), 'drop': [str(u) for u in drop if u],
                       'add': [n if isinstance(n, str) else sx_dump(n) for n in add],
-                      'ledger': dict(ledger or {}), 'vias': list(vias or []), 'note': note, 'pic': pic})
+                      'ledger': dict(ledger or {}), 'vias': list(vias or []), 'mask': list(mask or []),
+                      'note': note, 'pic': pic})
+
+
+REMOVED_MASK = []      # board-coordinate outlines of Eagle package stop-mask shapes removed (test mode / approved)
+
+
+def _record_removed_mask(d, polys):
+    """QC ledger eaglefix_removed_mask.json: the Gerber comparison treats an EAGLE-only mask opening inside
+    one of these outlines as a change made on purpose (information), like the removed vias."""
+    if not polys:
+        return
+    f = os.path.join(d, 'eaglefix_removed_mask.json')
+    try:
+        old_ = json.load(open(f, encoding='utf-8')) if os.path.isfile(f) else []
+    except Exception:
+        old_ = []
+    _save_json(old_ + [list(map(list, q)) for q in polys], f)
 
 
 def _pt(x, y):
@@ -405,9 +422,10 @@ def apply_proposals(d, proj, cli, sel_ids, tmpdir):
         return 4
     for x, b in baks:
         os.remove(b)
-    led = Counter(); vias = []
+    led = Counter(); vias = []; masks = []
     for p in sel:
-        led.update(p.get('ledger') or {}); vias += p.get('vias') or []
+        led.update(p.get('ledger') or {}); vias += p.get('vias') or []; masks += p.get('mask') or []
+    _record_removed_mask(d, masks)
     if led:
         lf = os.path.join(d, 'eaglefix_track_edits.json')
         old_ = json.load(open(lf, encoding='utf-8')) if os.path.isfile(lf) else {}
@@ -427,15 +445,38 @@ def apply_proposals(d, proj, cli, sel_ids, tmpdir):
     lines = [f'Approved deletions applied ({len(sel)} items, {nd} file entries removed); DRC / netlist unchanged:'] + \
             [f'  {v} x {k}' for k, v in by.items()] + ([f'{len(rest)} proposals left unapproved'] if rest else [])
     for l in lines: print(l)
-    _report_append(d, lines)
+    _report_append(d, lines, rest)
     progress(100, 'Done')
     return 0
 
 
-def _report_append(d, lines):
+def _report_append(d, lines, rest=None):
+    """add the approved deletions to the report and bring its 'waiting for your approval' section up to
+    date (it was written before the user decided)"""
+    f = os.path.join(d, 'eaglefix_report.md')
     try:
-        with open(os.path.join(d, 'eaglefix_report.md'), 'a', encoding='utf-8') as fh:
-            fh.write('\n## Deletions approved by the user\n\n' + ''.join(f'- {l}\n' for l in lines))
+        txt = open(f, encoding='utf-8').read()
+    except OSError:
+        return
+    if rest is not None:
+        hdr = '\n## Deletions waiting for your approval\n'
+        i = txt.find(hdr)
+        if i >= 0:
+            j = txt.find('\n## ', i + len(hdr))
+            j = len(txt) if j < 0 else j
+            if rest:
+                by = Counter(p['step'] for p in rest)
+                body = (f'\n- {len(rest)} items still wait for approval - nothing of them was deleted. The plugin '
+                        'shows each with a picture; or apply from the command line: '
+                        '`eagle2kicad_fix.py <project> --apply-proposals all|d001,d002`\n'
+                        + ''.join(f'-   {v} x {k}\n' for k, v in by.items()))
+            else:
+                body = '\n- none left - every proposed deletion was decided\n'
+            txt = txt[:i] + hdr + body + txt[j:]
+    txt = txt.rstrip('\n') + '\n\n## Deletions approved by the user\n\n' + ''.join(f'- {l}\n' for l in lines)
+    try:
+        with open(f, 'w', encoding='utf-8') as fh:
+            fh.write(txt)
     except OSError:
         pass
 
@@ -2355,6 +2396,12 @@ def _fp_mask_shapes_to_pad_masks(fp, pcb_path=None):
         for p, _, _, mk, _c in hit:
             if S not in mk:
                 ly = kid(p, 'layers'); ly.append(Q(S + '.Mask')); mk.add(S)
+    fat = kid(fp, 'at')
+    fx, fy = float(fat[1]), float(fat[2])
+    fa = math.radians(float(fat[3])) if len(fat) > 3 else 0.0
+    ca, sa = math.cos(fa), math.sin(fa)
+    board = [[[round(fx + x * ca + y * sa, 4), round(fy - x * sa + y * ca, 4)] for x, y in pts]
+             for k, S, pts in shapes if any(k is g for g in gone)]
     if gone and asking() and pcb_path:
         for k in gone:
             if kid(k, 'uuid') is None:
@@ -2363,10 +2410,11 @@ def _fp_mask_shapes_to_pad_masks(fp, pcb_path=None):
         propose('Package solder-mask shapes over pads (the pads open the mask themselves)',
                 f'{ref}: {len(gone)} Eagle stop-mask shapes ({", ".join(sorted({str(kid(k, "layer")[1]) for k in gone}))}) - '
                 'the opening becomes pad copper + mask margin', pcb_path,
-                drop=[str(kid(k, 'uuid')[1]) for k in gone], pic=_fp_pic(fp, gone))
+                drop=[str(kid(k, 'uuid')[1]) for k in gone], pic=_fp_pic(fp, gone), mask=board)
         return 0
     for k in gone:
         fp.remove(k)
+    REMOVED_MASK.extend(board)
     return n
 
 
@@ -4350,6 +4398,8 @@ def fix_pcb_sexpr(pcb_path, sch_refs, dry, ebrd=None):
         'moved to the Fab layer - KiCad needs a closed courtyard; not manufactured)')
     if not dry:
         write_sx(pcb_path, tree)
+        _record_removed_mask(os.path.dirname(pcb_path), REMOVED_MASK)
+    REMOVED_MASK.clear()
     return tree
 
 
@@ -5604,9 +5654,30 @@ def mfg_check(d, pcb, ref, ebrd, cli):
                          any(math.hypot(sp['x'] - x, sp['y'] - y) <= 0.5 for x, y in pts))]
                 n_cu += len(e_['spots']) - len(keep_)
                 e_['spots'] = keep_
-        if n_rm or n_cu:
+        n_mk = 0
+        try:                                   # Eagle package stop-mask shapes removed on purpose (approved / test mode)
+            rmk = json.load(open(os.path.join(d, 'eaglefix_removed_mask.json'), encoding='utf-8'))
+        except Exception:
+            rmk = []
+        if rmk:
+            ax, ay = r['align']['dx'], r['align']['dy']
+            boxes = []
+            for q in rmk:
+                xs = [x + ax for x, y in q]; ys = [-y + ay for x, y in q]
+                boxes.append((min(xs) - 0.3, min(ys) - 0.3, max(xs) + 0.3, max(ys) + 0.3))
+            for k_, e_ in (r.get('layers') or {}).items():
+                if not k_.startswith('mask:') or not e_.get('spots'):
+                    continue
+                keep_ = [sp for sp in e_['spots'] if not (sp.get('only_in') == 'eagle' and
+                         any(b[0] <= sp['x'] <= b[2] and b[1] <= sp['y'] <= b[3] for b in boxes))]
+                n_mk += len(e_['spots']) - len(keep_)
+                e_['spots'] = keep_
+        if n_rm or n_cu or n_mk:
             r['verdict'] = GC.verdict(r)
         fails, warns, infos = r['verdict']
+        if n_mk:
+            infos = list(infos) + [f'{n_mk} EAGLE solder-mask openings come from package stop-mask shapes removed on purpose '
+                                   '(the pads open the mask themselves - listed in eaglefix_removed_mask.json)']
         if n_rm or n_cu:
             infos = list(infos) + [f'{n_rm} EAGLE drill holes and {n_cu} copper / mask spots are vias deleted on purpose '
                                    '(connected on one layer only - listed in eaglefix_removed_vias.json)']

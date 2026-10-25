@@ -171,7 +171,8 @@ class ReviewDialog(wx.Dialog):
             self.rows.append(('h', st, len(items)))
             for pr in items:
                 self.rows.append(('i', pr))
-        self.lst = wx.CheckListBox(p, choices=[self._label(r) for r in self.rows], size=(520, -1))
+        self.lst = wx.CheckListBox(p, choices=[self._label(r) for r in self.rows], size=(520, -1),
+                                   style=wx.LB_HSCROLL)      # long titles scroll instead of being cut off
         self.pic = PicPanel(p)
         self.title = wx.StaticText(p, label='')
         self.title.SetFont(wx.Font(10, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
@@ -253,11 +254,13 @@ class ReviewDialog(wx.Dialog):
         loc = ''
         pic = pr.get('pic') or {}
         if pic.get('kind') == 'sch':
-            loc = f"  [sheet {pic.get('sheet', pr['file'])}]"
+            sheet = pic.get('sheet', pr['file'])
+            loc = '' if sheet in pr['title'] else f'  [sheet {sheet}]'
         elif pic.get('box'):
             b = pic['box']
             loc = f'  [x {(b[0] + b[2]) / 2:.2f}  y {(b[1] + b[3]) / 2:.2f} mm]'
         self.title.SetLabel(pr['title'] + loc)
+        self.lst.SetToolTip(pr['title'])
         self.title.Wrap(max(200, self.pic.GetSize().x))
         self.Layout()
         self.pic.show(pic, self.cb_after.GetValue())
