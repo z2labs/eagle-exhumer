@@ -440,6 +440,8 @@ class DialogDriver(threading.Thread):
         progress window can say what KiCad is waiting for instead of counting up an estimate."""
         if d in self.surfaced:
             return
+        if _title(d).startswith('Eagle Exhumer'):     # our own window (deletion review, questions) - not KiCad's
+            self.surfaced.add(d); return
         if msg is None:
             msg = dialog_text(d) if is_task_dialog(d) else (_text(d) or dialog_text(d))
             if benign_reason(msg):
