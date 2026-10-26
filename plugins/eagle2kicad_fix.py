@@ -2100,6 +2100,13 @@ def fix_unused_label_islands(cli, root_sch, sheets, tmpdir):
         and the pin gets a no-connect flag (it is open in Eagle too - nothing else is on that net).
     Every change is checked: the netlist (all nets with 2+ pins) must stay identical, else undone."""
     R.h('SCH: unused Eagle labels / wire pieces without pins')
+    pcb_nets = set()                    # net names the board carries: a label naming one stays (parity)
+    try:
+        pcb_f = os.path.splitext(root_sch)[0] + '.kicad_pcb'
+        if os.path.isfile(pcb_f):
+            pcb_nets = set(re.findall(r'\(net (?:\d+ )?"([^"]*)"\)', open(pcb_f, encoding='utf-8').read()))
+    except Exception:
+        pass
     erc = erc_run(cli, root_sch, tmpdir) if cli else None
     if erc is None:
         R.p('no ERC - skipped'); return
@@ -2143,7 +2150,8 @@ def fix_unused_label_islands(cli, root_sch, sheets, tmpdir):
             if seed is None:
                 if node[0] in _LBL and kind == 'label_dangling':     # a label on nothing at all
                     plan.append((sh, 'label', [], [node], [], set(), {str(node[1])})); done_ids.add(id(node))
-                elif node[0] in _LBL and kind in ('isolated_pin_label', 'label_single_pin') and p in pins:
+                elif node[0] in _LBL and kind in ('isolated_pin_label', 'label_single_pin') and p in pins \
+                        and str(node[1]) not in pcb_nets:
                     plan.append((sh, 'single', [], [node], [], {p}, {str(node[1])})); done_ids.add(id(node))
                 continue
             wires, labels, juncs, segs, pts, touches = _wire_island(sh, seed)
@@ -2161,7 +2169,8 @@ def fix_unused_label_islands(cli, root_sch, sheets, tmpdir):
                 continue
             if node[0] == 'wire' and not npin and len(names) <= 1:
                 kind_ = 'nopin'
-            elif node[0] in _LBL and len(npin) == 1 and len(names) == 1 and kind in ('isolated_pin_label', 'label_single_pin'):
+            elif node[0] in _LBL and len(npin) == 1 and len(names) == 1 and kind in ('isolated_pin_label', 'label_single_pin') \
+                    and not (names & pcb_nets):
                 kind_ = 'single'
             else:
                 continue
@@ -4157,11 +4166,15 @@ def fix_pcb_finishing(cli, pcb_path, tmpdir, dry):
 
 
 COVERED_STUBS = set()
+BOTH_ENDS_STUBS = set()      # KiCad 'track_dangling' on a track connected at both ends - kept, reported
 
 
 def _stubs_touching_copper(pcb_path, ids):
-    """Open-ended tracks whose free end still overlaps a pad / via of their net with its copper
-    (Eagle connects by overlap): real connections, never removed as dead copper."""
+    """Tracks that are not dead copper although KiCad's DRC calls them dangling, never removed:
+    - a free end that still overlaps a pad / via / track of its net with its copper (Eagle connects by overlap)
+    - every end connected: on a pad or via of its net, or on another track's end. KiCad 10 flags e.g. an
+      EAGLE curve wire (arc) from a track junction to a pad centre as 'track_dangling' at both ends -
+      deleting it can leave the pad hanging on a hair-thin end-cap overlap of a neighbour track (QRPi Q1 drain)."""
     keep = set()
     try:
         import pcbnew
@@ -4182,16 +4195,21 @@ def _stubs_touching_copper(pcb_path, ids):
                 COVERED_STUBS.add(u)             # a duplicate lying on a wider / equal track: copper unchanged
                 continue
             touch = own + same                   # Eagle also connects a track end lying on another track
+            ends_ok = 0
             for P in (t.GetStart(), t.GetEnd()):
                 linked = any(o.HitTest(P, 0) for o in own) or any(
                     o is not t and o.Type() != pcbnew.PCB_VIA_T and o.GetLayer() == L and o.GetNetCode() == n and
                     (abs(o.GetStart().x - P.x) + abs(o.GetStart().y - P.y) <= 1000 or
                      abs(o.GetEnd().x - P.x) + abs(o.GetEnd().y - P.y) <= 1000) for o in tr)
-                if not linked and any(o.HitTest(P, r) for o in touch):
-                    keep.add(u)
+                if linked:
+                    ends_ok += 1
+                elif any(o.HitTest(P, r) for o in touch):
+                    keep.add(u); ends_ok += 1
+            if ends_ok == 2:                     # connected at both ends: a real connection, not a stub
+                keep.add(u); BOTH_ENDS_STUBS.add(u)
         del b
     except Exception:
-        pass
+        return set(ids)                          # cannot check -> remove nothing
     return keep
 
 
@@ -4219,6 +4237,7 @@ def _remove_dead_copper(cli, pcb_path, pro_path, tmpdir):
     'delete tracks unconnected at one end': vias that connect nothing and short track stubs that end in
     free space (Eagle leftovers). Repeated until nothing changes (a stub chain), max 4 passes;
     DRC-guarded, undone if any connectivity error appears."""
+    BOTH_ENDS_STUBS.clear()
     d0 = drc_run(cli, pcb_path, tmpdir, parity=False)
     if d0 is None:
         return
@@ -4276,6 +4295,9 @@ def _remove_dead_copper(cli, pcb_path, pro_path, tmpdir):
         d = drc_run(cli, pcb_path, tmpdir, parity=False)
         if d is None:
             break
+    if BOTH_ENDS_STUBS:
+        R.p(f'{len(BOTH_ENDS_STUBS)} track(s) KiCad reports as dangling are connected at both ends '
+            '(pad / via / track end of their own net) - real connections, kept')
     worse = ['DRC failed'] if d is None else []
     if d is not None:
         b1 = cnt(d)
@@ -5764,7 +5786,9 @@ def check_3d_models(pcb_path):
     roots = [v for k, v in os.environ.items() if k.startswith('KICAD') and k.endswith('3DMODEL_DIR')]
     roots += glob.glob(r'C:\Program Files\KiCad\*\share\kicad\3dmodels') + ['/usr/share/kicad/3dmodels',
              '/Applications/KiCad/KiCad.app/Contents/SharedSupport/3dmodels']
+    prj = os.path.dirname(os.path.abspath(pcb_path))
     def found(fn):
+        fn = fn.replace('${KIPRJMOD}', prj).replace('$(KIPRJMOD)', prj)
         f = re.sub(r'\$\{KICAD\d*_3DMODEL_DIR\}', '{root}', fn)
         if '{root}' in f:
             return any(os.path.isfile(f.replace('{root}', r)) for r in roots)
