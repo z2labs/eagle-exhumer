@@ -14,6 +14,14 @@ Eagle Exhumer runs KiCad's own importer, repairs the importer defects listed bel
 
 > Status: **0.9 testing**. KiCad 10.0. One-click import: Windows. Fix + check of an already imported project: all platforms (Linux/macOS experimental, untested).
 
+## Demo video
+
+A real run on Windows 11 + KiCad 10, from an empty project to QC PASS (2:30):
+
+[![Eagle Exhumer demo: Eagle to KiCad 10, converted, fixed, verified](https://img.youtube.com/vi/AspPm9ZAAWU/maxresdefault.jpg)](https://youtu.be/AspPm9ZAAWU)
+
+https://youtu.be/AspPm9ZAAWU
+
 ## What the fixer repairs
 
 | # | KiCad 10 importer defect | Effect on the board | Fix |
