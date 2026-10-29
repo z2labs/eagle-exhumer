@@ -21,7 +21,7 @@ import wx
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-VERSION = '0.9.20'
+VERSION = '0.9.21'
 # shown at the bottom of the plugin window; address written out against address harvesters
 SERVICES = ('Need a hand? Z2Labs takes on PCB conversion, RF hardware design and RF troubleshooting - '
             'hello [at] z2labs [dot] io')

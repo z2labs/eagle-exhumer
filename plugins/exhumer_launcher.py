@@ -420,8 +420,8 @@ def main():
     f = Intro()
     if '--snapshot' in sys.argv:                    # render one frame to a PNG (docs / tests) and quit
         out = sys.argv[sys.argv.index('--snapshot') + 1]
-        f.muted = True; f.src = 'KrakenSDR_3v3.sch'; f.verdict = 'QC PASS'
-        f.lines += ['> exhuming -> KrakenSDR_3v3_kicad', '  kicad-cli pcb import: ok', '  QC: netlists, pads, Gerbers match']
+        f.muted = True; f.src = 'old_board.sch'; f.verdict = 'QC PASS'
+        f.lines += ['> exhuming -> old_board_kicad', '  kicad-cli pcb import: ok', '  QC: netlists, pads, Gerbers match']
         def shot():
             f.snapshot(out); f.Destroy()
         wx.CallLater(800, shot)

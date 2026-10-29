@@ -1,8 +1,8 @@
 {
   "$schema": "https://go.kicad.org/pcm/schemas/v1",
   "name": "Eagle Exhumer",
-  "description": "Eagle to KiCad 10 import that repairs the known importer defects, with strong quality control against the Eagle source.",
-  "description_full": "Eagle Exhumer brings old Autodesk EAGLE designs (6.x-9.x XML .sch/.brd, and binary 4.x/5.x files through a built-in converter) into KiCad 10.\n\nAfter KiCad's own EAGLE importer it repairs 15 importer defects found on real boards: power nets, Eagle 'nc' pins, lost net names, package copper polygons and printed jumpers (net ties), NPTH rings, via restring, net classes and the Eagle clearance matrix, milling, board outlines drawn inside packages, copper layer count, and more.\n\nEvery conversion ends with a strong quality control against the original Eagle files and a strict PASS / FAIL verdict, with a Markdown report and 3D renders.\n\nWindows: one-click import of a new design. All platforms: fix + check an already imported project (Linux/macOS: experimental).\n\nNot affiliated with or endorsed by Autodesk. EAGLE is a trademark of Autodesk, Inc.",
+  "description": "One-click Eagle (.sch/.brd) to KiCad 10 import with KiCad's own importer, automatic repair and strict QC against the Eagle source and Gerbers.",
+  "description_full": "Eagle Exhumer brings old Autodesk EAGLE designs (6.x-9.x XML .sch/.brd, and binary 4.x/5.x files through a built-in converter) into KiCad 10.\n\nOne click: pick the Eagle .sch or .brd, and KiCad's own EAGLE importer runs first. Eagle Exhumer then repairs automatically what the import leaves broken, from defects found on real boards: power nets, Eagle 'nc' pins, lost net names, package copper polygons and printed jumpers (net ties), NPTH rings, via restring, net classes and the Eagle clearance matrix, milling, board outlines drawn inside packages, copper layer count, and more.\n\nEvery conversion ends with a strong quality control against the Eagle source and the Eagle manufacturing Gerbers, with a strict PASS / FAIL verdict, a Markdown report and 3D renders.\n\nNothing is deleted without your approval: every proposed removal is shown with a before/after picture and applied only if you tick it.\n\nWindows: one-click import of a new design. All platforms: fix + check of an already imported project (Linux/macOS: experimental).\n\nNot affiliated with or endorsed by Autodesk. EAGLE is a trademark of Autodesk, Inc.",
   "identifier": "com.github.z2labs.eagle-exhumer",
   "type": "plugin",
   "author": {
@@ -31,7 +31,7 @@
   ],
   "versions": [
     {
-      "version": "0.9.20",
+      "version": "0.9.21",
       "status": "testing",
       "kicad_version": "10.0"
     }
