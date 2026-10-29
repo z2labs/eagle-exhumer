@@ -21,6 +21,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # a release made by hand (with its asset already in the KiCad PCM metadata) is left untouched:
+          # rebuilding the zip would change its sha256 and break the published metadata
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "release ${GITHUB_REF_NAME} already exists - not touching it"
+            exit 0
+          fi
           gh release create "${GITHUB_REF_NAME}" dist/*.zip \
             dist/metadata-submission/*/metadata.json \
             --title "Eagle Exhumer ${GITHUB_REF_NAME}" --generate-notes --prerelease
